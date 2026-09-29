@@ -1,0 +1,16 @@
+import { mkdirSync, readFileSync, writeFileSync, copyFileSync, existsSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { WORK_TYPES, OBJECT, EMPLOYEE, GEO_CASES } from '../server.mjs';
+const root = dirname(dirname(fileURLToPath(import.meta.url)));
+const site = join(root, 'phone-demo');
+mkdirSync(join(site, 'dist'), { recursive: true });
+mkdirSync(join(site, '.openai'), { recursive: true });
+for (const file of ['style.css', 'app.js', 'demo-store.js']) copyFileSync(join(root, 'public', file), join(site, 'dist', file));
+const index = readFileSync(join(root, 'public', 'index.html'), 'utf8').replace('<script src="/app.js" defer></script>', '<script src="/demo-config.js" defer></script>\n  <script src="/demo-store.js" defer></script>\n  <script src="/app.js" defer></script>');
+writeFileSync(join(site, 'dist', 'index.html'), index);
+writeFileSync(join(site, 'dist', 'demo-config.js'), `window.DEMO_CONFIG = ${JSON.stringify({ WORK_TYPES, OBJECT, EMPLOYEE, GEO_CASES })};\n`);
+const manifest = join(site, '.openai', 'hosting.json');
+if (!existsSync(manifest)) writeFileSync(manifest, JSON.stringify({ static: { directory: 'dist' } }, null, 2) + '\n');
+writeFileSync(join(site, '.gitignore'), '.sites-runtime/\nnode_modules/\n*.log\n');
+console.log('Подготовлен phone-demo: только демонстрационный интерфейс, без документов, ключей и базы проекта.');

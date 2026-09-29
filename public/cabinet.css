@@ -1,0 +1,50 @@
+:root { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; color: #1d2935; background: #f5f7f8; font-size: 16px; line-height: 1.45; }
+* { box-sizing: border-box; }
+body { margin: 0; }
+button, input, select { font: inherit; }
+button { min-height: 44px; border: 1px solid #b9c5cf; border-radius: 5px; padding: 9px 14px; color: #173a55; background: #fff; font-weight: 600; cursor: pointer; }
+button:hover:not(:disabled) { background: #edf3f6; }
+button.primary { color: #fff; background: #173a55; border-color: #173a55; }
+button.primary:hover:not(:disabled) { background: #285a79; }
+button:disabled { opacity: .6; cursor: wait; }
+:focus-visible { outline: 3px solid #b2631b; outline-offset: 3px; }
+.shell { min-height: 100vh; display: grid; grid-template-columns: 256px minmax(0, 1fr); }
+.sidebar { position: sticky; top: 0; height: 100vh; padding: 24px 16px; background: #fff; border-right: 1px solid #d9e0e5; display: flex; flex-direction: column; }
+.sidebar-head { display: flex; align-items: center; justify-content: space-between; padding: 0 12px 24px; font-size: 18px; font-weight: 750; }
+.close-menu { display: none; border: 0; padding: 6px 10px; font-size: 24px; }
+.sidebar nav { display: grid; gap: 4px; }
+.nav-item { border: 0; border-radius: 4px; text-align: left; color: #354b5d; background: transparent; }
+.nav-item.active { color: #fff; background: #173a55; }
+.nav-item.active:hover { background: #285a79; }
+.sidebar-note { margin: auto 12px 4px; color: #647380; font-size: 13px; }
+.content { min-width: 0; padding: 36px clamp(24px, 5vw, 72px); }
+.page { max-width: 1040px; }
+.page-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; margin-bottom: 28px; }
+h1 { margin: 0; font-size: 28px; line-height: 1.2; }
+h2 { margin: 0 0 8px; font-size: 19px; }
+.page-head p { margin: 7px 0 0; color: #647380; }
+.table-wrap { overflow-x: auto; border: 1px solid #d9e0e5; border-radius: 6px; background: #fff; }
+table { width: 100%; border-collapse: collapse; }
+th, td { padding: 15px 16px; text-align: left; border-bottom: 1px solid #e7ecef; white-space: nowrap; }
+th { color: #627180; background: #f8fafb; font-size: 13px; font-weight: 650; }
+tbody tr { cursor: pointer; }
+tbody tr:hover { background: #f4f8fa; }
+tbody tr:last-child td { border-bottom: 0; }
+.open-mark { width: 40px; color: #627180; font-size: 22px; }
+.empty-state { max-width: 560px; padding: 28px 0; color: #647380; }
+.empty-state p { margin: 0 0 18px; }
+.form-page { max-width: 680px; }
+.back { min-height: auto; margin: 0 0 14px; padding: 0; border: 0; color: #536b7d; }
+.control { display: grid; gap: 7px; margin-bottom: 18px; }
+label { font-size: 14px; font-weight: 650; }
+input, select { min-height: 46px; border: 1px solid #aebdc8; border-radius: 4px; padding: 10px 12px; color: #1d2935; background: #fff; }
+.privacy { margin: 28px 0; padding: 18px; border: 1px solid #d9e0e5; border-radius: 6px; background: #fff; }
+.privacy p { color: #526574; font-size: 14px; }
+.check { display: flex; align-items: flex-start; gap: 10px; font-weight: 500; }
+.check input { width: 20px; min-height: 20px; margin-top: 1px; }
+.form-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 24px; }
+.error { max-width: 720px; margin: 0 0 20px; padding: 12px 14px; border-left: 3px solid #b44827; background: #fff1eb; color: #74301a; }
+.mobile-head, .scrim { display: none; }
+.loading { padding: 64px 24px; text-align: center; }
+@media (max-width: 760px) { .shell { display: block; } .sidebar { position: fixed; z-index: 2; width: 280px; transform: translateX(-102%); transition: transform .18s ease; box-shadow: 8px 0 24px rgba(30, 48, 62, .12); } .sidebar.open { transform: translateX(0); } .close-menu { display: block; } .scrim.visible { display: block; position: fixed; z-index: 1; inset: 0; background: rgba(20, 31, 40, .35); } .content { padding: 16px; } .mobile-head { display: flex; align-items: center; gap: 14px; margin-bottom: 26px; color: #415565; font-weight: 650; } .mobile-head button { min-height: 44px; } .page-head { margin-bottom: 22px; } h1 { font-size: 24px; } .page-head .primary { flex-shrink: 0; padding: 9px 11px; font-size: 14px; } th, td { padding: 14px; } .form-actions { flex-direction: column-reverse; } .form-actions button { width: 100%; } }
+@media (prefers-reduced-motion: reduce) { .sidebar { transition: none; } }
