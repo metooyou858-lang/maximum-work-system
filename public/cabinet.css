@@ -40,6 +40,12 @@ label { font-size: 14px; font-weight: 650; }
 input, select { min-height: 46px; border: 1px solid #aebdc8; border-radius: 4px; padding: 10px 12px; color: #1d2935; background: #fff; }
 .privacy { margin: 28px 0; padding: 18px; border: 1px solid #d9e0e5; border-radius: 6px; background: #fff; }
 .privacy p { color: #526574; font-size: 14px; }
+.object-location { margin: 28px 0; }
+.object-location > p { margin: 0 0 12px; color: #526574; font-size: 14px; }
+.object-map { height: 360px; border: 1px solid #aebdc8; background: #edf2f5; }
+.map-status { min-height: 22px; margin: 0 0 8px; color: #526574; font-size: 14px; }
+.map-point { font-variant-numeric: tabular-nums; }
+.map-pin { transform: translate(-50%, -100%); padding: 6px 8px; border: 2px solid #fff; border-radius: 4px; color: #fff; background: #b2631b; box-shadow: 0 1px 3px rgba(20, 31, 40, .35); font-size: 12px; font-weight: 700; white-space: nowrap; }
 .check { display: flex; align-items: flex-start; gap: 10px; font-weight: 500; }
 .check input { width: 20px; min-height: 20px; margin-top: 1px; }
 .form-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 24px; }

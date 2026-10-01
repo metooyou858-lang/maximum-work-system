@@ -63,7 +63,8 @@ function editor() {
     const isKnown = options.includes(value);
     return `<div class="control"><label for="${name}">${label}</label><select id="${name}" name="${name}" required><option value="" disabled ${value ? '' : 'selected'}>Выберите размер</option>${!isKnown && value ? `<option value="${escapeHtml(value)}" selected>${escapeHtml(value)}</option>` : ''}${options.map(option => `<option value="${option}" ${option === value ? 'selected' : ''}>${option}</option>`).join('')}</select></div>`;
   };
-  return `<section class="page form-page"><header class="page-head"><div><button class="back" id="cancel">← К списку</button><h1>${escapeHtml(title)}</h1></div></header><form id="record-form">${resource.fields.map(field).join('')}${current === 'employees' ? `<section class="privacy"><h2>Персональные данные</h2><p>Версия политики устанавливается системой: «Тестовая политика 1.0». После утверждения документа она будет заменена на его номер и дату. Фотография и загрузка документов отключены: это тестовая среда.</p><label class="check"><input id="privacy-confirmed" type="checkbox" ${item.privacy_confirmed_at ? 'checked' : ''} required> Подтверждение ознакомления с политикой зафиксировано</label></section>` : ''}<div id="form-error" role="alert"></div><div class="form-actions"><button type="button" id="cancel-bottom">Отменить</button><button class="primary" type="submit">${item.id ? 'Сохранить изменения' : 'Создать карточку'}</button></div></form></section>`;
+  const objectLocation = current === 'objects' ? `<section class="object-location" aria-labelledby="map-title"><h2 id="map-title">Точка объекта</h2><p>Поставьте маркер касанием карты. Радиус — допустимое расстояние для отметки прибытия.</p><div id="object-map-status" class="map-status" role="status">Подключаем карту…</div><div id="object-map" class="object-map" aria-label="Карта для выбора точки объекта"></div><input id="latitude" name="latitude" type="hidden" value="${escapeHtml(item.latitude ?? '')}"><input id="longitude" name="longitude" type="hidden" value="${escapeHtml(item.longitude ?? '')}"><p id="object-point" class="map-point">${item.latitude !== null && item.latitude !== undefined && item.longitude !== null && item.longitude !== undefined ? `Точка: ${Number(item.latitude).toFixed(6)}, ${Number(item.longitude).toFixed(6)}` : 'Точка пока не выбрана.'}</p><div class="control"><label for="radius">Радиус объекта, м</label><input id="radius" name="radius" type="number" inputmode="numeric" min="10" max="5000" step="1" required value="${escapeHtml(item.radius ?? 150)}"></div></section>` : '';
+  return `<section class="page form-page"><header class="page-head"><div><button class="back" id="cancel">← К списку</button><h1>${escapeHtml(title)}</h1></div></header><form id="record-form">${resource.fields.map(field).join('')}${objectLocation}${current === 'employees' ? `<section class="privacy"><h2>Персональные данные</h2><p>Версия политики устанавливается системой: «Тестовая политика 1.0». После утверждения документа она будет заменена на его номер и дату. Фотография и загрузка документов отключены: это тестовая среда.</p><label class="check"><input id="privacy-confirmed" type="checkbox" ${item.privacy_confirmed_at ? 'checked' : ''} required> Подтверждение ознакомления с политикой зафиксировано</label></section>` : ''}<div id="form-error" role="alert"></div><div class="form-actions"><button type="button" id="cancel-bottom">Отменить</button><button class="primary" type="submit">${item.id ? 'Сохранить изменения' : 'Создать карточку'}</button></div></form></section>`;
 }
 function render(message = '') {
   root.innerHTML = `<div class="shell">${nav()}<div class="scrim ${menuOpen ? 'visible' : ''}" id="scrim"></div><main class="content"><header class="mobile-head"><button id="open-menu" aria-label="Открыть меню">Меню</button><span>${resources[current].title}</span></header>${message ? `<div class="error" role="alert">${escapeHtml(message)}</div>` : ''}${editing === null ? list() : editor()}</main></div>`;
@@ -76,12 +77,65 @@ function render(message = '') {
   document.querySelector('#cancel')?.addEventListener('click', () => { editing = null; render(); });
   document.querySelector('#cancel-bottom')?.addEventListener('click', () => { editing = null; render(); });
   document.querySelector('#record-form')?.addEventListener('submit', save);
+  if (editing !== null && current === 'objects') initializeObjectMap().catch(error => { const status = document.querySelector('#object-map-status'); if (status) status.textContent = error.message; });
+}
+
+let yandexMapsPromise;
+function loadYandexMaps(scriptUrl) {
+  if (window.ymaps3) return Promise.resolve();
+  if (!yandexMapsPromise) yandexMapsPromise = new Promise((resolve, reject) => {
+    const script = document.createElement('script');
+    script.src = scriptUrl;
+    script.async = true;
+    script.onload = resolve;
+    script.onerror = () => reject(new Error('Яндекс Карты не загрузились. После смены ограничения Referer Яндекс может применять настройку до 15 минут; затем проверьте разрешённый HTTPS-адрес тестового контура.'));
+    document.head.append(script);
+  });
+  return yandexMapsPromise;
+}
+async function initializeObjectMap() {
+  const config = await api('/api/cabinet/map-config', undefined, 'GET');
+  const status = document.querySelector('#object-map-status');
+  if (!config.enabled) { status.textContent = 'Яндекс Карты пока не подключены: укажите ключ YANDEX_MAPS_API_KEY в окружении сервера.'; return; }
+  await loadYandexMaps(config.scriptUrl);
+  await window.ymaps3.ready;
+  const root = document.querySelector('#object-map');
+  if (!root || root.dataset.ready) return;
+  root.dataset.ready = 'true';
+  const latitude = Number(document.querySelector('#latitude').value);
+  const longitude = Number(document.querySelector('#longitude').value);
+  const hasPoint = Number.isFinite(latitude) && Number.isFinite(longitude);
+  const map = new window.ymaps3.YMap(root, { location: { center: hasPoint ? [longitude, latitude] : [37.6176, 55.7558], zoom: hasPoint ? 16 : 10 } });
+  map.addChild(new window.ymaps3.YMapDefaultSchemeLayer({}));
+  map.addChild(new window.ymaps3.YMapDefaultFeaturesLayer({ zIndex: 1800 }));
+  let marker;
+  const setPoint = coordinates => {
+    const [longitude, latitude] = coordinates;
+    document.querySelector('#latitude').value = latitude.toFixed(6);
+    document.querySelector('#longitude').value = longitude.toFixed(6);
+    document.querySelector('#object-point').textContent = `Точка: ${latitude.toFixed(6)}, ${longitude.toFixed(6)}`;
+    if (marker) map.removeChild(marker);
+    const pin = document.createElement('div');
+    pin.className = 'map-pin';
+    pin.textContent = 'Объект';
+    marker = new window.ymaps3.YMapMarker({ coordinates }, pin);
+    map.addChild(marker);
+    status.textContent = 'Точка выбрана. Сохраните карточку объекта.';
+  };
+  if (hasPoint) setPoint([longitude, latitude]);
+  map.addChild(new window.ymaps3.YMapListener({ layer: 'any', onClick: (_, event) => { if (event?.coordinates) setPoint(event.coordinates); } }));
+  status.textContent = hasPoint ? 'Точка загружена. Коснитесь карты, чтобы перенести её.' : 'Коснитесь карты, чтобы поставить точку объекта.';
 }
 async function save(event) {
   event.preventDefault();
   const form = event.currentTarget;
   if (!form.reportValidity()) return;
   const input = Object.fromEntries(new FormData(form));
+  if (current === 'objects') {
+    input.latitude = Number(input.latitude);
+    input.longitude = Number(input.longitude);
+    input.radius = Number(input.radius);
+  }
   if (current === 'employees') input.privacy_confirmed_at = new Date().toISOString();
   const button = form.querySelector('[type="submit"]');
   button.disabled = true;

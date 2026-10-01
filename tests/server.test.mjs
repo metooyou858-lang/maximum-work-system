@@ -73,9 +73,12 @@ test('Кабинет руководителя создаёт и редактир
   try {
     const manager = (await request('/api/demo/session', { role: 'manager' })).data;
     assert.equal((await request('/api/cabinet/objects')).status, 401);
-    const object = await request('/api/cabinet/objects', { address: 'Учебный адрес, 1' }, manager.token);
+    assert.equal((await request('/api/cabinet/map-config', undefined, manager.token)).data.enabled, false);
+    assert.equal((await request('/api/cabinet/objects', { address: 'Учебный адрес, 1', latitude: 55.7558, longitude: 37.6176, radius: 150 }, manager.token)).status, 201);
+    const object = await request('/api/cabinet/objects', { address: 'Учебный адрес, 2', latitude: 55.7558, longitude: 37.6176, radius: 150 }, manager.token);
     assert.equal(object.status, 201);
-    assert.equal((await request('/api/cabinet/objects', undefined, manager.token)).data[0].address, 'Учебный адрес, 1');
+    assert.equal((await request('/api/cabinet/objects', undefined, manager.token)).data[0].radius, 150);
+    assert.equal((await request('/api/cabinet/objects', { address: 'Без точки', latitude: 91, longitude: 37.6176, radius: 150 }, manager.token)).status, 400);
     const employee = await request('/api/cabinet/employees', { full_name: 'Тестов Тест Тестович', birth_date: '1990-04-21', clothing_size: '52', shoe_size: '43', privacy_confirmed_at: '2026-09-28T00:00:00.000Z' }, manager.token);
     assert.equal(employee.status, 201);
     assert.equal(employee.data.privacy_policy_version, 'Тестовая политика 1.0');
@@ -84,5 +87,24 @@ test('Кабинет руководителя создаёт и редактир
     assert.equal(equipment.status, 201);
     assert.equal((await request(`/api/cabinet/equipment/${equipment.data.id}`, { name: 'Учебная установка', inventory_number: 'TEST-001', equipment_type: 'Алмазная установка' }, manager.token, 'PUT')).data.equipment_type, 'Алмазная установка');
     assert.equal((await request('/api/cabinet/equipment', { name: 'Другая установка', inventory_number: 'TEST-001', equipment_type: 'Буровая установка' }, manager.token)).status, 409);
+  } finally { await app.close(); }
+});
+
+test('Конфигурация Яндекс Карт доступна только руководителю и берёт ключ из окружения приложения', async () => {
+  const app = createApp({ database: ':memory:', yandexMapsApiKey: 'test-map-key' });
+  await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve));
+  const origin = `http://127.0.0.1:${app.server.address().port}`;
+  const request = async token => {
+    const response = await fetch(`${origin}/api/cabinet/map-config`, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
+    return { status: response.status, data: await response.json() };
+  };
+  try {
+    assert.equal((await request()).status, 401);
+    const session = await fetch(`${origin}/api/demo/session`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ role: 'manager' }) });
+    const manager = await session.json();
+    const config = await request(manager.token);
+    assert.equal(config.status, 200);
+    assert.equal(config.data.enabled, true);
+    assert.ok(config.data.scriptUrl.includes('apikey=test-map-key'));
   } finally { await app.close(); }
 });

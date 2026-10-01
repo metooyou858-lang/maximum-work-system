@@ -1,13 +1,14 @@
 import http from 'node:http';
 import { DatabaseSync } from 'node:sqlite';
 import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = dirname(fileURLToPath(import.meta.url));
 const sessionDays = 7;
 const roles = new Set(['manager', 'foreman', 'employee']);
+const privacyPolicyVersion = 'Тестовая политика 1.0';
 
 const passwordHash = password => {
   const salt = randomBytes(16);
@@ -26,10 +27,21 @@ export function createWorkApp({ database = join(root, 'data', 'work.sqlite'), bo
   if (database !== ':memory:') mkdirSync(dirname(database), { recursive: true });
   const db = new DatabaseSync(database);
   db.exec(`PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;
-    CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, login TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('manager','foreman','employee')), status TEXT NOT NULL CHECK(status IN ('active','suspended')), created_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, login TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('manager','foreman','employee')), status TEXT NOT NULL CHECK(status IN ('active','suspended')), employee_id INTEGER UNIQUE REFERENCES work_employees(id), created_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), expires_at INTEGER NOT NULL, created_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS audit_log (id INTEGER PRIMARY KEY, user_id INTEGER REFERENCES users(id), event TEXT NOT NULL, created_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS work_objects (id INTEGER PRIMARY KEY, address TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS work_employees (id INTEGER PRIMARY KEY, full_name TEXT NOT NULL, email TEXT NOT NULL UNIQUE, phone TEXT NOT NULL, birth_date TEXT NOT NULL, clothing_size TEXT NOT NULL, shoe_size TEXT NOT NULL, photo_file TEXT, photo_mime TEXT, privacy_policy_version TEXT NOT NULL, privacy_confirmed_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS work_equipment (id INTEGER PRIMARY KEY, name TEXT NOT NULL, inventory_number TEXT NOT NULL UNIQUE, equipment_type TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS work_employee_access (employee_id INTEGER PRIMARY KEY REFERENCES work_employees(id), user_id INTEGER UNIQUE REFERENCES users(id), state TEXT NOT NULL CHECK(state IN ('pending_activation','active','suspended')), created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
   `);
+  const hasColumn = (table, column) => db.prepare(`PRAGMA table_info(${table})`).all().some(item => item.name === column);
+  if (!hasColumn('work_employees', 'email')) db.exec('ALTER TABLE work_employees ADD COLUMN email TEXT');
+  if (!hasColumn('work_employees', 'phone')) db.exec('ALTER TABLE work_employees ADD COLUMN phone TEXT');
+  if (!hasColumn('work_employees', 'photo_file')) db.exec('ALTER TABLE work_employees ADD COLUMN photo_file TEXT');
+  if (!hasColumn('work_employees', 'photo_mime')) db.exec('ALTER TABLE work_employees ADD COLUMN photo_mime TEXT');
+  if (!hasColumn('users', 'employee_id')) db.exec('ALTER TABLE users ADD COLUMN employee_id INTEGER REFERENCES work_employees(id)');
+  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS work_employees_email_unique ON work_employees(email) WHERE email IS NOT NULL; CREATE UNIQUE INDEX IF NOT EXISTS users_employee_unique ON users(employee_id) WHERE employee_id IS NOT NULL;');
   if (bootstrapAdmin && db.prepare('SELECT 1 FROM users LIMIT 1').get() === undefined) {
     const login = cleanLogin(bootstrapAdmin.login);
     if (!login || typeof bootstrapAdmin.password !== 'string' || bootstrapAdmin.password.length < 14) throw new Error('Для первого руководителя нужны логин и пароль не короче 14 символов.');
@@ -43,12 +55,67 @@ export function createWorkApp({ database = join(root, 'data', 'work.sqlite'), bo
     return row || null;
   };
   const audit = (userId, event) => db.prepare('INSERT INTO audit_log (user_id, event, created_at) VALUES (?, ?, ?)').run(userId, event, new Date().toISOString());
-  const readJson = async req => { let raw = ''; for await (const chunk of req) { raw += chunk; if (Buffer.byteLength(raw) > 4096) throw new Error('large'); } try { return JSON.parse(raw || '{}'); } catch { throw new Error('json'); } };
+  const readJson = async req => { let raw = ''; for await (const chunk of req) { raw += chunk; if (Buffer.byteLength(raw) > 7 * 1024 * 1024) throw new Error('Файл слишком большой. Выберите фотографию до 5 МБ.'); } try { return JSON.parse(raw || '{}'); } catch { throw new Error('Не удалось прочитать запрос.'); } };
+  const requireManager = req => {
+    const user = currentUser(req);
+    if (!user) { const error = new Error('auth'); error.status = 401; throw error; }
+    if (user.role !== 'manager') { const error = new Error('role'); error.status = 403; throw error; }
+    return user;
+  };
+  const text = (value, label) => {
+    if (typeof value !== 'string' || !value.trim() || value.trim().length > 200) { const error = new Error(`Проверьте поле «${label}».`); error.status = 400; throw error; }
+    return value.trim();
+  };
+  const resources = {
+    objects: { table: 'work_objects', fields: ['address'], labels: { address: 'Адрес объекта' } },
+    employees: { table: 'work_employees', fields: ['full_name', 'email', 'phone', 'birth_date', 'clothing_size', 'shoe_size', 'privacy_policy_version', 'privacy_confirmed_at'], labels: { full_name: 'ФИО', email: 'Личный email', phone: 'Телефон', birth_date: 'Дата рождения', clothing_size: 'Размер одежды', shoe_size: 'Размер обуви', privacy_confirmed_at: 'Подтверждение политики' } },
+    equipment: { table: 'work_equipment', fields: ['name', 'inventory_number', 'equipment_type'], labels: { name: 'Название', inventory_number: 'Инвентарный номер', equipment_type: 'Тип оборудования' } },
+  };
+  const resourceFor = pathname => {
+    const match = /^\/api\/manager\/(objects|employees|equipment)(?:\/(\d+))?$/.exec(pathname);
+    return match ? { key: match[1], id: match[2] ? Number(match[2]) : null, ...resources[match[1]] } : null;
+  };
+  const photoFor = input => {
+    if (input === undefined) return null;
+    if (!input || typeof input !== 'object' || typeof input.type !== 'string' || typeof input.base64 !== 'string') { const error = new Error('Не удалось прочитать фотографию.'); error.status = 400; throw error; }
+    const allowed = { 'image/jpeg': { extension: 'jpg', signature: bytes => bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff }, 'image/png': { extension: 'png', signature: bytes => bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) }, 'image/webp': { extension: 'webp', signature: bytes => bytes.subarray(0, 4).equals(Buffer.from('RIFF')) && bytes.subarray(8, 12).equals(Buffer.from('WEBP')) } };
+    const format = allowed[input.type]; const bytes = Buffer.from(input.base64, 'base64');
+    if (!format || !bytes.length || bytes.length > 5 * 1024 * 1024 || !format.signature(bytes)) { const error = new Error('Загрузите JPG, PNG или WebP размером до 5 МБ.'); error.status = 400; throw error; }
+    return { bytes, mime: input.type, extension: format.extension };
+  };
+  const valueFor = async (resource, req) => {
+    const input = await readJson(req);
+    const photo = resource.key === 'employees' ? photoFor(input.photo_data) : null;
+    const writable = resource.key === 'employees' ? resource.fields.filter(field => field !== 'privacy_policy_version') : resource.fields;
+    if (!input || Object.keys(input).some(key => !writable.includes(key) && key !== 'photo_data')) { const error = new Error('В карточке есть неподдерживаемые поля.'); error.status = 400; throw error; }
+    const value = Object.fromEntries(resource.fields.map(field => [field, field === 'privacy_policy_version' ? privacyPolicyVersion : text(input[field], resource.labels[field]) ]));
+    if (resource.key === 'employees' && !/^\d{4}-\d{2}-\d{2}$/.test(value.birth_date)) { const error = new Error('Укажите дату рождения.'); error.status = 400; throw error; }
+    if (resource.key === 'employees' && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.email)) { const error = new Error('Укажите личный email в обычном формате.'); error.status = 400; throw error; }
+    if (resource.key === 'employees' && !/^[0-9+()\-\s]{7,30}$/.test(value.phone)) { const error = new Error('Укажите телефон в обычном формате.'); error.status = 400; throw error; }
+    return { value, photo };
+  };
+  const assets = {
+    '/': ['work-cabinet.html', 'text/html; charset=utf-8'],
+    '/work-cabinet.js': ['work-cabinet.js', 'text/javascript; charset=utf-8'],
+    '/work-cabinet.css': ['work-cabinet.css', 'text/css; charset=utf-8'],
+  };
   const server = http.createServer(async (req, res) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'no-referrer');
     res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('Permissions-Policy', 'geolocation=(), camera=(), microphone=()');
+    res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
     try {
+      const url = new URL(req.url, 'http://localhost');
+      if (req.method === 'GET' && assets[url.pathname]) {
+        const [file, type] = assets[url.pathname];
+        res.writeHead(200, { 'Content-Type': type, 'Cache-Control': 'no-cache' });
+        return res.end(readFileSync(join(root, 'public', file)));
+      }
+      if (['POST', 'PUT'].includes(req.method)) {
+        if (req.headers['content-type']?.split(';')[0] !== 'application/json') return json(res, 415, { error: 'Ожидается JSON.' });
+        if (req.headers.origin && new URL(req.headers.origin).host !== req.headers.host) return json(res, 403, { error: 'Запрос с другого сайта запрещён.' });
+      }
       if (req.method === 'GET' && req.url === '/api/health') return json(res, 200, { ok: true, mode: 'work' });
       if (req.method === 'GET' && req.url === '/api/auth/session') { const user = currentUser(req); return user ? json(res, 200, { user }) : json(res, 401, { error: 'Требуется вход.' }); }
       if (req.method === 'POST' && req.url === '/api/auth/login') {
@@ -63,8 +130,63 @@ export function createWorkApp({ database = join(root, 'data', 'work.sqlite'), bo
         return json(res, 201, { token, user: { id: user.id, login: user.login, role: user.role } });
       }
       if (req.method === 'POST' && req.url === '/api/auth/logout') { const user = currentUser(req); if (user) { db.prepare('DELETE FROM sessions WHERE token_hash=?').run(tokenHash((req.headers.authorization || '').replace(/^Bearer /, ''))); audit(user.id, 'logout'); } return json(res, 204, {}); }
+      const resource = resourceFor(url.pathname);
+      const photoMatch = /^\/api\/manager\/employees\/(\d+)\/photo$/.exec(url.pathname);
+      if (photoMatch && req.method === 'GET') {
+        requireManager(req);
+        const photo = db.prepare('SELECT photo_file, photo_mime FROM work_employees WHERE id=?').get(Number(photoMatch[1]));
+        if (!photo?.photo_file || !photo.photo_mime) return json(res, 404, { error: 'Фотография не загружена.' });
+        res.writeHead(200, { 'Content-Type': photo.photo_mime, 'Cache-Control': 'no-store' });
+        return res.end(readFileSync(join(root, 'data', 'employee-photos', photo.photo_file)));
+      }
+      if (resource && req.method === 'GET') {
+        requireManager(req);
+        if (resource.id) {
+          const record = db.prepare(`SELECT * FROM ${resource.table} WHERE id=?`).get(resource.id);
+          return record ? json(res, 200, record) : json(res, 404, { error: 'Карточка не найдена.' });
+        }
+        return json(res, 200, db.prepare(`SELECT * FROM ${resource.table} ORDER BY updated_at DESC, id DESC`).all());
+      }
+      if (resource && req.method === 'POST' && !resource.id) {
+        const user = requireManager(req); const { value, photo } = await valueFor(resource, req); const now = new Date().toISOString();
+        try {
+          const result = db.prepare(`INSERT INTO ${resource.table} (${resource.fields.join(', ')}, created_at, updated_at) VALUES (${resource.fields.map(() => '?').join(', ')}, ?, ?)`).run(...resource.fields.map(field => value[field]), now, now);
+          if (resource.key === 'employees') db.prepare("INSERT INTO work_employee_access (employee_id, state, created_at, updated_at) VALUES (?, 'pending_activation', ?, ?)").run(result.lastInsertRowid, now, now);
+          if (photo) {
+            const file = `${randomBytes(18).toString('hex')}.${photo.extension}`;
+            const directory = join(root, 'data', 'employee-photos'); mkdirSync(directory, { recursive: true }); writeFileSync(join(directory, file), photo.bytes);
+            db.prepare('UPDATE work_employees SET photo_file=?, photo_mime=?, updated_at=? WHERE id=?').run(file, photo.mime, now, result.lastInsertRowid);
+          }
+          audit(user.id, `create_${resource.key}`);
+          return json(res, 201, db.prepare(`SELECT * FROM ${resource.table} WHERE id=?`).get(result.lastInsertRowid));
+        } catch (error) {
+          if (error.message?.includes('UNIQUE constraint failed')) return json(res, 409, { error: resource.key === 'equipment' ? 'Такой инвентарный номер уже есть.' : 'Такая запись уже существует.' });
+          throw error;
+        }
+      }
+      if (resource && req.method === 'PUT' && resource.id) {
+        const user = requireManager(req); const { value, photo } = await valueFor(resource, req); const now = new Date().toISOString();
+        try {
+          const result = db.prepare(`UPDATE ${resource.table} SET ${resource.fields.map(field => `${field}=?`).join(', ')}, updated_at=? WHERE id=?`).run(...resource.fields.map(field => value[field]), now, resource.id);
+          if (!result.changes) return json(res, 404, { error: 'Карточка не найдена.' });
+          if (photo) {
+            const file = `${randomBytes(18).toString('hex')}.${photo.extension}`;
+            const directory = join(root, 'data', 'employee-photos'); mkdirSync(directory, { recursive: true }); writeFileSync(join(directory, file), photo.bytes);
+            db.prepare('UPDATE work_employees SET photo_file=?, photo_mime=?, updated_at=? WHERE id=?').run(file, photo.mime, now, resource.id);
+          }
+          audit(user.id, `update_${resource.key}`);
+          return json(res, 200, db.prepare(`SELECT * FROM ${resource.table} WHERE id=?`).get(resource.id));
+        } catch (error) {
+          if (error.message?.includes('UNIQUE constraint failed')) return json(res, 409, { error: 'Такой инвентарный номер уже есть.' });
+          throw error;
+        }
+      }
       return json(res, 404, { error: 'Маршрут не найден.' });
-    } catch { return json(res, 400, { error: 'Некорректный запрос.' }); }
+    } catch (error) {
+      if (error.status === 401) return json(res, 401, { error: 'Требуется вход.' });
+      if (error.status === 403) return json(res, 403, { error: 'Действие доступно только руководителю.' });
+      return json(res, error.status || 400, { error: error.message || 'Некорректный запрос.' });
+    }
   });
   return { server, db, close: () => new Promise(resolve => server.close(() => { db.close(); resolve(); })) };
 }

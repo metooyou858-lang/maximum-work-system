@@ -54,7 +54,7 @@ async function body(req) {
   try { return JSON.parse(raw || '{}'); } catch { fail(400, 'Не удалось прочитать запрос.'); }
 }
 
-export function createApp({ database = join(root, 'data', 'demo.sqlite') } = {}) {
+export function createApp({ database = join(root, 'data', 'demo.sqlite'), yandexMapsApiKey = process.env.YANDEX_MAPS_API_KEY } = {}) {
   if (database !== ':memory:') mkdirSync(dirname(database), { recursive: true });
   const db = new DatabaseSync(database);
   db.exec(`PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;
@@ -63,10 +63,13 @@ export function createApp({ database = join(root, 'data', 'demo.sqlite') } = {})
     CREATE TABLE IF NOT EXISTS visits (room_id TEXT PRIMARY KEY REFERENCES rooms(id), arrived_at TEXT NOT NULL, distance INTEGER NOT NULL, accuracy INTEGER NOT NULL, employee TEXT NOT NULL, object_name TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS attempts (id INTEGER PRIMARY KEY, room_id TEXT NOT NULL REFERENCES rooms(id), created_at TEXT NOT NULL, outcome TEXT NOT NULL, message TEXT NOT NULL, distance INTEGER);
     CREATE TABLE IF NOT EXISTS reports (room_id TEXT PRIMARY KEY REFERENCES rooms(id), submitted_at TEXT NOT NULL, work_type TEXT NOT NULL, work_label TEXT NOT NULL, quantity REAL NOT NULL, unit TEXT NOT NULL, parameters TEXT NOT NULL, comment TEXT NOT NULL, employee TEXT NOT NULL, object_name TEXT NOT NULL);
-    CREATE TABLE IF NOT EXISTS cabinet_objects (id INTEGER PRIMARY KEY, address TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS cabinet_objects (id INTEGER PRIMARY KEY, address TEXT NOT NULL UNIQUE, latitude REAL, longitude REAL, radius INTEGER, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS cabinet_employees (id INTEGER PRIMARY KEY, full_name TEXT NOT NULL, birth_date TEXT NOT NULL, clothing_size TEXT NOT NULL, shoe_size TEXT NOT NULL, privacy_policy_version TEXT NOT NULL, privacy_confirmed_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS cabinet_equipment (id INTEGER PRIMARY KEY, name TEXT NOT NULL, inventory_number TEXT NOT NULL UNIQUE, equipment_type TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
   `);
+  for (const [column, type] of [['latitude', 'REAL'], ['longitude', 'REAL'], ['radius', 'INTEGER']]) {
+    if (!db.prepare("SELECT 1 FROM pragma_table_info('cabinet_objects') WHERE name = ?").get(column)) db.exec(`ALTER TABLE cabinet_objects ADD COLUMN ${column} ${type}`);
+  }
   const json = (res, status, value) => {
     res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
     res.end(JSON.stringify(value));
@@ -104,8 +107,8 @@ export function createApp({ database = join(root, 'data', 'demo.sqlite') } = {})
   const cabinet = {
     objects: {
       table: 'cabinet_objects',
-      fields: ['address'],
-      labels: { address: 'Адрес объекта' },
+      fields: ['address', 'latitude', 'longitude', 'radius'],
+      labels: { address: 'Адрес объекта', latitude: 'Широта', longitude: 'Долгота', radius: 'Радиус объекта' },
     },
     employees: {
       table: 'cabinet_employees',
@@ -126,15 +129,22 @@ export function createApp({ database = join(root, 'data', 'demo.sqlite') } = {})
   const cabinetValue = (resource, input) => {
     const inputFields = resource.key === 'employees' ? resource.fields.filter(field => field !== 'privacy_policy_version') : resource.fields;
     if (!input || Object.keys(input).some(key => !inputFields.includes(key))) fail(400, 'В карточке есть неподдерживаемые поля.');
-    const value = Object.fromEntries(resource.fields.map(field => [field, field === 'privacy_policy_version' ? CURRENT_PRIVACY_POLICY_VERSION : text(input[field], resource.labels[field])]));
+    const value = Object.fromEntries(resource.fields.map(field => [field, field === 'privacy_policy_version' ? CURRENT_PRIVACY_POLICY_VERSION : resource.key === 'objects' && ['latitude', 'longitude', 'radius'].includes(field) ? input[field] : text(input[field], resource.labels[field])]));
+    if (resource.key === 'objects') {
+      for (const field of ['latitude', 'longitude', 'radius']) value[field] = input[field];
+      if (!Number.isFinite(value.latitude) || value.latitude < -90 || value.latitude > 90) fail(400, 'Укажите точку объекта на карте.');
+      if (!Number.isFinite(value.longitude) || value.longitude < -180 || value.longitude > 180) fail(400, 'Укажите точку объекта на карте.');
+      if (!Number.isInteger(value.radius) || value.radius < 10 || value.radius > 5000) fail(400, 'Радиус объекта должен быть от 10 до 5 000 м.');
+    }
     if (resource.key === 'employees' && !/^\d{4}-\d{2}-\d{2}$/.test(value.birth_date)) fail(400, 'Укажите дату рождения.');
     return value;
   };
   const server = http.createServer(async (req, res) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('Referrer-Policy', 'no-referrer');
+    // JS API Яндекс Карт авторизует загрузку по Referer разрешённого HTTPS-контура.
+    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
     res.setHeader('Permissions-Policy', 'geolocation=(), camera=(), microphone=()');
-    res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
+    res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self' https://api-maps.yandex.ru; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://*.maps.yandex.ru https://*.yandex.ru; connect-src 'self' https://*.maps.yandex.ru https://*.yandex.ru; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
     try {
       const url = new URL(req.url, 'http://localhost');
       if (req.method === 'GET' && assets[url.pathname]) {
@@ -148,6 +158,11 @@ export function createApp({ database = join(root, 'data', 'demo.sqlite') } = {})
         if (req.headers.origin && new URL(req.headers.origin).host !== req.headers.host) fail(403, 'Запрос с другого сайта запрещён.');
       }
       const resource = cabinetResource(url.pathname);
+      if (req.method === 'GET' && url.pathname === '/api/cabinet/map-config') {
+        authenticate(req, 'manager');
+        const key = typeof yandexMapsApiKey === 'string' ? yandexMapsApiKey.trim() : '';
+        return json(res, 200, { provider: 'yandex', enabled: Boolean(key), scriptUrl: key ? `https://api-maps.yandex.ru/v3/?apikey=${encodeURIComponent(key)}&lang=ru_RU` : null });
+      }
       if (resource && req.method === 'GET') {
         authenticate(req, 'manager');
         if (resource.id) {
