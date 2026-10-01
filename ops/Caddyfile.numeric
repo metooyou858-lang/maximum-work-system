@@ -1,0 +1,20 @@
+89-125-214-188.sslip.io {
+    encode zstd gzip
+
+    @root path /
+    redir @root /manager/ permanent
+
+    @managerRoot path /manager
+    redir @managerRoot /manager/ permanent
+
+    @legacyCabinet path /cabinet /cabinet/*
+    redir @legacyCabinet /manager/ permanent
+
+    handle_path /manager/* {
+        reverse_proxy 127.0.0.1:4174
+    }
+
+    handle {
+        reverse_proxy 127.0.0.1:4173
+    }
+}

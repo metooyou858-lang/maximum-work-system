@@ -60,7 +60,7 @@ async function api(path, input, method = 'POST') {
   return result;
 }
 function loginView(message = '') {
-  root.innerHTML = `<main class="login"><section><p class="eyebrow">Учёт работ, сотрудников и оборудования</p><h1>Рабочий кабинет</h1><p>Войдите под индивидуальной учётной записью руководителя.</p>${message ? `<div class="error" role="alert">${escapeHtml(message)}</div>` : ''}<form id="login-form"><div class="control"><label for="login">Логин</label><input id="login" name="login" autocomplete="username" maxlength="64" required></div><div class="control"><label for="password">Пароль</label><input id="password" name="password" type="password" autocomplete="current-password" required></div><button class="primary" type="submit">Войти</button></form><p class="note">Рабочее направление: в этой среде используйте только синтетические данные.</p></section></main>`;
+  root.innerHTML = `<main class="login"><section><p class="eyebrow">MAXIMUM · учёт работ</p><h1>Вход в систему</h1><p>Войдите под своей учётной записью руководителя или сотрудника.</p>${message ? `<div class="error" role="alert">${escapeHtml(message)}</div>` : ''}<form id="login-form"><div class="control"><label for="login">Логин</label><input id="login" name="login" autocomplete="username" maxlength="64" required></div><div class="control"><label for="password">Пароль</label><input id="password" name="password" type="password" autocomplete="current-password" required></div><button class="primary" type="submit">Войти</button></form><p class="note">В тестовой среде используются только синтетические данные.</p></section></main>`;
   document.querySelector('#login-form').onsubmit = submitLogin;
 }
 async function submitLogin(event) {
