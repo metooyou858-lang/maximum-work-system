@@ -30,7 +30,7 @@ export function createWorkApp({ database = join(root, 'data', 'work.sqlite'), bo
     CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, login TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('manager','foreman','employee')), status TEXT NOT NULL CHECK(status IN ('active','suspended')), employee_id INTEGER UNIQUE REFERENCES work_employees(id), created_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS work_sessions (token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), expires_at INTEGER NOT NULL, created_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS audit_log (id INTEGER PRIMARY KEY, user_id INTEGER REFERENCES users(id), event TEXT NOT NULL, created_at TEXT NOT NULL);
-    CREATE TABLE IF NOT EXISTS work_objects (id INTEGER PRIMARY KEY, address TEXT NOT NULL UNIQUE, latitude REAL, longitude REAL, radius INTEGER, address_verified INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS work_objects (id INTEGER PRIMARY KEY, contractor_name TEXT NOT NULL DEFAULT '', address TEXT NOT NULL UNIQUE, latitude REAL, longitude REAL, radius INTEGER, address_verified INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS work_employees (id INTEGER PRIMARY KEY, full_name TEXT NOT NULL, email TEXT NOT NULL UNIQUE, phone TEXT NOT NULL, birth_date TEXT NOT NULL, clothing_size TEXT NOT NULL, shoe_size TEXT NOT NULL, photo_file TEXT, photo_mime TEXT, privacy_policy_version TEXT NOT NULL, privacy_confirmed_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS work_equipment (id INTEGER PRIMARY KEY, name TEXT NOT NULL, inventory_number TEXT NOT NULL UNIQUE, equipment_type TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS work_employee_access (employee_id INTEGER PRIMARY KEY REFERENCES work_employees(id), user_id INTEGER UNIQUE REFERENCES users(id), state TEXT NOT NULL CHECK(state IN ('pending_activation','active','suspended')), created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
@@ -44,6 +44,7 @@ export function createWorkApp({ database = join(root, 'data', 'work.sqlite'), bo
     if (!hasColumn('work_objects', column)) db.exec(`ALTER TABLE work_objects ADD COLUMN ${column} ${type}`);
   }
   if (!hasColumn('work_objects', 'address_verified')) db.exec('ALTER TABLE work_objects ADD COLUMN address_verified INTEGER NOT NULL DEFAULT 0');
+  if (!hasColumn('work_objects', 'contractor_name')) db.exec("ALTER TABLE work_objects ADD COLUMN contractor_name TEXT NOT NULL DEFAULT ''");
   if (!hasColumn('users', 'employee_id')) db.exec('ALTER TABLE users ADD COLUMN employee_id INTEGER REFERENCES work_employees(id)');
   db.exec('CREATE UNIQUE INDEX IF NOT EXISTS work_employees_email_unique ON work_employees(email) WHERE email IS NOT NULL; CREATE UNIQUE INDEX IF NOT EXISTS users_employee_unique ON users(employee_id) WHERE employee_id IS NOT NULL;');
   if (bootstrapAdmin && db.prepare('SELECT 1 FROM users LIMIT 1').get() === undefined) {
@@ -71,7 +72,7 @@ export function createWorkApp({ database = join(root, 'data', 'work.sqlite'), bo
     return value.trim();
   };
   const resources = {
-    objects: { table: 'work_objects', fields: ['address', 'latitude', 'longitude', 'radius', 'address_verified'], labels: { address: 'Адрес объекта', latitude: 'Широта', longitude: 'Долгота', radius: 'Радиус объекта' } },
+    objects: { table: 'work_objects', fields: ['contractor_name', 'address', 'latitude', 'longitude', 'radius', 'address_verified'], labels: { contractor_name: 'Наименование подрядчика', address: 'Адрес объекта', latitude: 'Широта', longitude: 'Долгота', radius: 'Радиус объекта' } },
     employees: { table: 'work_employees', fields: ['full_name', 'email', 'phone', 'birth_date', 'clothing_size', 'shoe_size', 'privacy_policy_version', 'privacy_confirmed_at'], labels: { full_name: 'ФИО', email: 'Личный email', phone: 'Телефон', birth_date: 'Дата рождения', clothing_size: 'Размер одежды', shoe_size: 'Размер обуви', privacy_confirmed_at: 'Подтверждение политики' } },
     equipment: { table: 'work_equipment', fields: ['name', 'inventory_number', 'equipment_type'], labels: { name: 'Название', inventory_number: 'Инвентарный номер', equipment_type: 'Тип оборудования' } },
   };
