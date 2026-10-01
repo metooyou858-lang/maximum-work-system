@@ -35,6 +35,14 @@ export async function createWorkApp({ database = process.env.DATABASE_URL, boots
     CREATE TABLE IF NOT EXISTS work_equipment (id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL, inventory_number TEXT NOT NULL UNIQUE, equipment_type TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS work_employee_access (employee_id BIGINT PRIMARY KEY REFERENCES work_employees(id), user_id BIGINT UNIQUE REFERENCES users(id), state TEXT NOT NULL CHECK(state IN ('pending_activation','active','suspended')), created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
   `);
+  // Ранняя миграция SQLite создала ключи без PostgreSQL-последовательностей.
+  for (const table of ['users', 'audit_log', 'work_objects', 'work_employees', 'work_equipment']) {
+    const sequence = `${table}_id_seq`;
+    await db.exec(`CREATE SEQUENCE IF NOT EXISTS ${sequence};`);
+    await db.exec(`ALTER SEQUENCE ${sequence} OWNED BY ${table}.id;`);
+    await db.exec(`ALTER TABLE ${table} ALTER COLUMN id SET DEFAULT nextval('${sequence}');`);
+    await db.exec(`SELECT setval('${sequence}', COALESCE(MAX(id), 1), MAX(id) IS NOT NULL) FROM ${table};`);
+  }
   const hasColumn = async (table, column) => (await db.prepare('SELECT column_name FROM information_schema.columns WHERE table_name=? AND column_name=?').all(table, column)).length > 0;
   if (bootstrapAdmin && await db.prepare('SELECT 1 FROM users LIMIT 1').get() === undefined) {
     const login = cleanLogin(bootstrapAdmin.login);
