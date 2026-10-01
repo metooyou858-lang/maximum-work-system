@@ -20,4 +20,4 @@ button:hover:not(:disabled) { background: #edf3f6; } button.primary { color: #ff
 .map-status { min-height: 22px; margin: 0 0 8px; color: #526574; font-size: 14px; }
 .map-point { font-variant-numeric: tabular-nums; }
 .map-pin { width: 24px; height: 24px; border-radius: 50% 50% 50% 0; background: #1c75bc; border: 3px solid #fff; box-shadow: 0 1px 4px #0005; transform: rotate(-45deg); }
-.address-control { display: flex; gap: 8px; }.address-control input { flex: 1; }.address-control button { min-height: 46px; }
+.address-control { position: relative; }.address-control input { width: 100%; }.address-suggestions { position: absolute; z-index: 10; top: calc(100% + 4px); right: 0; left: 0; overflow: hidden; border: 1px solid #aebdc8; border-radius: 4px; background: #fff; box-shadow: 0 8px 20px rgba(31, 53, 67, .14); }.address-suggestion { display: block; width: 100%; min-height: 44px; border: 0; border-bottom: 1px solid #e7ecef; border-radius: 0; padding: 10px 12px; text-align: left; font-weight: 500; }.address-suggestion:last-child { border-bottom: 0; }.address-suggestion:hover, .address-suggestion:focus-visible { background: #edf3f6; }

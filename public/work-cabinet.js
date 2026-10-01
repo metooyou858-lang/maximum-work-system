@@ -28,6 +28,7 @@ let photoUrl = null;
 let yandexMapsPromise;
 let objectMap;
 let objectMarker;
+let selectedAddressCoordinates;
 const routeKey = 'maximum-work-route';
 const apiRoot = '/manager';
 
@@ -130,7 +131,7 @@ function editor() {
     if (type === 'file') return `<div class="control"><label for="${name}">${label}</label><input id="${name}" type="file" accept="image/jpeg,image/png,image/webp"><p class="field-note">JPG, PNG или WebP до 5 МБ${item.photo_file ? '. Фотография уже загружена' : ''}.</p></div>`;
     if (type !== 'select') {
       const hint = name === 'email' ? ' autocomplete="email" placeholder="name@example.ru"' : name === 'phone' ? ' autocomplete="tel" inputmode="tel" placeholder="+7 (999) 999-99-99" pattern="\\+7 \\(\\d{3}\\) \\d{3}-\\d{2}-\\d{2}"' : '';
-      if (current === 'objects' && name === 'address') return `<div class="control"><label for="address">Адрес объекта</label><div class="address-control"><input id="address" name="address" type="text" maxlength="200" required placeholder="Например: Хабаровск, улица Ленина, 1" value="${escapeHtml(value)}"><button type="button" id="address-search-button">Проверить на карте</button></div></div>`;
+      if (current === 'objects' && name === 'address') return `<div class="control address-control-wrap"><label for="address">Адрес объекта</label><div class="address-control"><input id="address" name="address" type="text" maxlength="200" required autocomplete="off" placeholder="Например: Хабаровск, улица Ленина, 1" value="${escapeHtml(value)}"><div id="address-suggestions" class="address-suggestions" role="listbox" aria-label="Подсказки адресов" hidden></div></div><p class="field-note">Начните вводить адрес и выберите вариант из подсказок Яндекса.</p></div>`;
       return `<div class="control"><label for="${name}">${label}</label><input id="${name}" name="${name}" type="${type}" maxlength="200" required${hint} value="${escapeHtml(value)}"></div>`;
     }
     return `<div class="control"><label for="${name}">${label}</label><select id="${name}" name="${name}" required><option value="" disabled ${value ? '' : 'selected'}>Выберите размер</option>${options.map(option => `<option value="${option}" ${option === value ? 'selected' : ''}>${option}</option>`).join('')}</select></div>`;
@@ -156,12 +157,14 @@ async function initializeObjectMap() {
   map.addChild(new window.ymaps3.YMapDefaultSchemeLayer({})); map.addChild(new window.ymaps3.YMapDefaultFeaturesLayer({ zIndex: 1800 }));
   const setPoint = (coordinates, confirmed = false) => { document.querySelector('#longitude').value = coordinates[0]; document.querySelector('#latitude').value = coordinates[1]; document.querySelector('#address-confirmed').value = confirmed ? 'true' : ''; document.querySelector('#object-point').textContent = confirmed ? `Адрес подтверждён: ${coordinates[1].toFixed(6)}, ${coordinates[0].toFixed(6)}` : 'Адрес нужно подтвердить через поиск Яндекса.'; if (objectMarker) map.removeChild(objectMarker); const pin = document.createElement('div'); pin.className = 'map-pin'; objectMarker = new window.ymaps3.YMapMarker({ coordinates }, pin); map.addChild(objectMarker); status.textContent = confirmed ? 'Адрес найден и подтверждён. Сохраните карточку объекта.' : 'Точка изменена. Выберите адрес через поиск Яндекса.'; };
   if (hasPoint) setPoint([longitude, latitude], document.querySelector('#address-confirmed').value === 'true');
-  const addressInput = document.querySelector('#address');
-  addressInput.addEventListener('input', () => { document.querySelector('#address-confirmed').value = ''; status.textContent = 'Выберите адрес из подсказок Яндекса, чтобы подтвердить его.'; });
-  const searchAddress = async () => { const query = document.querySelector('#address').value.trim(); if (!query) return; status.textContent = 'Проверяем адрес через Яндекс…'; try { const results = await api(`/api/manager/geocode?q=${encodeURIComponent(query)}`, undefined, 'GET'); const result = results[0]; if (!result) throw new Error('Яндекс не нашёл такой адрес. Уточните улицу и номер дома.'); document.querySelector('#address').value = result.address; map.update({ location: { center: [result.longitude, result.latitude], zoom: 16, duration: 400 } }); setPoint([result.longitude, result.latitude], true); } catch (error) { status.textContent = error.message; } };
-  document.querySelector('#address-search-button').onclick = searchAddress;
-  document.querySelector('#address').onkeydown = event => { if (event.key === 'Enter') { event.preventDefault(); searchAddress(); } };
-  map.addChild(new window.ymaps3.YMapListener({ layer: 'any', onClick: (_, event) => { if (event?.coordinates) setPoint(event.coordinates); } }));
+  const addressInput = document.querySelector('#address'); const suggestions = document.querySelector('#address-suggestions'); let suggestionTimer; let suggestionRequest = 0; let addressSelectionLocked = Boolean(document.querySelector('#address-confirmed').value);
+  const closeSuggestions = () => { suggestions.replaceChildren(); suggestions.hidden = true; };
+  const chooseAddress = result => { const coordinates = [Number(result.longitude), Number(result.latitude)]; selectedAddressCoordinates = coordinates; addressSelectionLocked = true; addressInput.value = result.address; closeSuggestions(); map.update({ location: { center: coordinates, zoom: 16, duration: 400 } }); setPoint(coordinates, true); const confirm = () => { document.querySelector('#longitude').value = String(coordinates[0]); document.querySelector('#latitude').value = String(coordinates[1]); document.querySelector('#address-confirmed').value = 'true'; }; confirm(); setTimeout(confirm, 100); };
+  const loadSuggestions = async query => { const request = ++suggestionRequest; status.textContent = 'Ищем адреса через Яндекс…'; try { const results = await api(`/api/manager/geocode?q=${encodeURIComponent(query)}`, undefined, 'GET'); if (request !== suggestionRequest) return; suggestions.replaceChildren(); results.slice(0, 5).forEach(result => { const option = document.createElement('button'); option.type = 'button'; option.className = 'address-suggestion'; option.setAttribute('role', 'option'); option.textContent = result.address; option.onclick = () => chooseAddress(result); suggestions.appendChild(option); }); suggestions.hidden = results.length === 0; status.textContent = results.length ? 'Выберите адрес из подсказок Яндекса.' : 'Яндекс не нашёл подходящий адрес.'; } catch (error) { if (request === suggestionRequest) { closeSuggestions(); status.textContent = error.message; } } };
+  addressInput.addEventListener('input', () => { selectedAddressCoordinates = null; addressSelectionLocked = false; document.querySelector('#address-confirmed').value = ''; closeSuggestions(); suggestionRequest += 1; const query = addressInput.value.trim(); status.textContent = query.length >= 3 ? 'Подбираем варианты адреса…' : 'Введите минимум 3 символа адреса.'; clearTimeout(suggestionTimer); if (query.length >= 3) suggestionTimer = setTimeout(() => loadSuggestions(query), 450); });
+  addressInput.addEventListener('focus', () => { if (suggestions.childElementCount) suggestions.hidden = false; });
+  addressInput.addEventListener('blur', () => setTimeout(closeSuggestions, 150));
+  map.addChild(new window.ymaps3.YMapListener({ layer: 'any', onClick: (_, event) => { if (event?.coordinates && !addressSelectionLocked) setPoint(event.coordinates); } }));
   status.textContent = hasPoint ? 'Точка загружена. Коснитесь карты, чтобы перенести её.' : 'Коснитесь карты, чтобы поставить точку объекта.'; objectMap = map;
 }
 function details() {
@@ -207,7 +210,7 @@ async function load(restoreRoute = false) {
 }
 async function save(event) {
   event.preventDefault(); const form = event.currentTarget; if (!form.reportValidity()) return;
-  const input = Object.fromEntries(new FormData(form)); if (current === 'objects') { input.latitude = Number(input.latitude); input.longitude = Number(input.longitude); input.radius = Number(input.radius); input.address_verified = input.address_confirmed === 'true'; delete input.address_confirmed; } if (current === 'employees') input.privacy_confirmed_at = new Date().toISOString();
+  const input = Object.fromEntries(new FormData(form)); if (current === 'objects') { if (selectedAddressCoordinates) { input.longitude = String(selectedAddressCoordinates[0]); input.latitude = String(selectedAddressCoordinates[1]); input.address_confirmed = 'true'; } input.latitude = Number(input.latitude); input.longitude = Number(input.longitude); input.radius = Number(input.radius); input.address_verified = input.address_confirmed === 'true'; delete input.address_confirmed; } if (current === 'employees') input.privacy_confirmed_at = new Date().toISOString();
   const button = form.querySelector('[type="submit"]'); button.disabled = true;
   try {
     const photo = form.querySelector('#photo')?.files[0];
