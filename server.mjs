@@ -144,7 +144,7 @@ export function createApp({ database = join(root, 'data', 'demo.sqlite'), yandex
     // JS API Яндекс Карт авторизует загрузку по Referer разрешённого HTTPS-контура.
     res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
     res.setHeader('Permissions-Policy', 'geolocation=(), camera=(), microphone=()');
-    res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self' https://api-maps.yandex.ru; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://*.maps.yandex.ru https://*.yandex.ru; connect-src 'self' https://*.maps.yandex.ru https://*.yandex.ru; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
+    res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self' https://api-maps.yandex.ru https://yastatic.net; style-src 'self' 'unsafe-inline' https://yastatic.net; img-src 'self' data: https://*.maps.yandex.ru https://*.yandex.ru https://*.maps.yandex.net; connect-src 'self' https://*.maps.yandex.ru https://*.yandex.ru https://*.maps.yandex.net https://yastatic.net; worker-src 'self' blob: data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
     try {
       const url = new URL(req.url, 'http://localhost');
       if (req.method === 'GET' && assets[url.pathname]) {

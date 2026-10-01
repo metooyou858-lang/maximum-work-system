@@ -37,7 +37,7 @@ done
 if curl --fail --silent --show-error http://127.0.0.1:4173/api/health | grep -q '"ok":true'; then ok 'application health endpoint'; else fail 'application health endpoint'; fi
 if curl --fail --silent --show-error --connect-timeout 10 https://89-125-214-188.sslip.io/api/health | grep -q '"ok":true'; then ok 'public HTTPS proxy'; else fail 'public HTTPS proxy'; fi
 if curl --fail --silent --show-error http://127.0.0.1:4174/api/health | grep -q '"ok":true'; then ok 'work cabinet health endpoint'; else fail 'work cabinet health endpoint'; fi
-if curl --fail --silent --show-error --connect-timeout 10 https://work-89-125-214-188.sslip.io/api/health | grep -q '"ok":true'; then ok 'work cabinet public HTTPS proxy'; else fail 'work cabinet public HTTPS proxy'; fi
+if curl --fail --silent --show-error --connect-timeout 10 https://89-125-214-188.sslip.io/manager/api/health | grep -q '"ok":true'; then ok 'work cabinet public HTTPS path'; else fail 'work cabinet public HTTPS path'; fi
 if [ -r /etc/maximum/environment ] && grep -q '^YANDEX_MAPS_API_KEY=[0-9a-f-]\{36\}$' /etc/maximum/environment; then ok 'Yandex Maps key present without printing it'; else fail 'Yandex Maps key missing or malformed'; fi
 latest=$(find /var/backups/maximum -maxdepth 1 -type f -name 'demo_*.sqlite' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -n 1 | cut -d ' ' -f 2-)
 if [ -n "$latest" ]; then

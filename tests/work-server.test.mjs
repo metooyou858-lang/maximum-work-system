@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createWorkApp } from '../work-server.mjs';
 
 test('рабочий вход создаёт индивидуальную сессию без хранения пароля', async () => {
-  const app = createWorkApp({ database: ':memory:', bootstrapAdmin: { login: 'manager.maximum', password: 'correct-horse-battery-2026' } });
+  const app = createWorkApp({ database: ':memory:', yandexMapsApiKey: 'test-key', bootstrapAdmin: { login: 'manager.maximum', password: 'correct-horse-battery-2026' } });
   await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve));
   const origin = `http://127.0.0.1:${app.server.address().port}`;
   const request = async (path, body, token, method = body === undefined ? 'GET' : 'POST') => { const res = await fetch(origin + path, { method, headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) }, body: body === undefined ? undefined : JSON.stringify(body) }); return { status: res.status, data: res.status === 204 ? null : await res.json() }; };
@@ -16,8 +16,10 @@ test('рабочий вход создаёт индивидуальную сес
     assert.equal((await request('/api/auth/session', undefined, login.data.token)).data.user.login, 'manager.maximum');
     assert.equal(app.db.prepare('SELECT password_hash FROM users').get().password_hash.includes('correct-horse'), false);
     assert.equal((await request('/api/manager/objects')).status, 401);
-    const object = await request('/api/manager/objects', { address: 'Учебный адрес, 1' }, login.data.token);
+    assert.equal((await request('/api/manager/map-config', undefined, login.data.token)).data.enabled, true);
+    const object = await request('/api/manager/objects', { address: 'Учебный адрес, 1', latitude: 55.7558, longitude: 37.6176, radius: 150 }, login.data.token);
     assert.equal(object.status, 201);
+    assert.equal(object.data.radius, 150);
     assert.equal((await request('/api/manager/objects', undefined, login.data.token)).data[0].address, 'Учебный адрес, 1');
     const photo = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL0XQAAAABJRU5ErkJggg==';
     const employee = await request('/api/manager/employees', { full_name: 'Тестов Тест Тестович', email: 'testov@example.test', phone: '+7 900 123-45-67', birth_date: '1990-04-21', clothing_size: '52', shoe_size: '43', privacy_confirmed_at: '2026-09-29T00:00:00.000Z', photo_data: { type: 'image/png', base64: photo } }, login.data.token);

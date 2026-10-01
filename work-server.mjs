@@ -23,14 +23,14 @@ const passwordMatches = (password, stored) => {
 };
 const cleanLogin = value => typeof value === 'string' && /^[a-z0-9][a-z0-9._-]{2,63}$/i.test(value) ? value.toLowerCase() : null;
 
-export function createWorkApp({ database = join(root, 'data', 'work.sqlite'), bootstrapAdmin } = {}) {
+export function createWorkApp({ database = join(root, 'data', 'work.sqlite'), bootstrapAdmin, yandexMapsApiKey = process.env.YANDEX_MAPS_API_KEY } = {}) {
   if (database !== ':memory:') mkdirSync(dirname(database), { recursive: true });
   const db = new DatabaseSync(database);
   db.exec(`PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;
     CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, login TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('manager','foreman','employee')), status TEXT NOT NULL CHECK(status IN ('active','suspended')), employee_id INTEGER UNIQUE REFERENCES work_employees(id), created_at TEXT NOT NULL);
-    CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), expires_at INTEGER NOT NULL, created_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS work_sessions (token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), expires_at INTEGER NOT NULL, created_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS audit_log (id INTEGER PRIMARY KEY, user_id INTEGER REFERENCES users(id), event TEXT NOT NULL, created_at TEXT NOT NULL);
-    CREATE TABLE IF NOT EXISTS work_objects (id INTEGER PRIMARY KEY, address TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS work_objects (id INTEGER PRIMARY KEY, address TEXT NOT NULL UNIQUE, latitude REAL, longitude REAL, radius INTEGER, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS work_employees (id INTEGER PRIMARY KEY, full_name TEXT NOT NULL, email TEXT NOT NULL UNIQUE, phone TEXT NOT NULL, birth_date TEXT NOT NULL, clothing_size TEXT NOT NULL, shoe_size TEXT NOT NULL, photo_file TEXT, photo_mime TEXT, privacy_policy_version TEXT NOT NULL, privacy_confirmed_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS work_equipment (id INTEGER PRIMARY KEY, name TEXT NOT NULL, inventory_number TEXT NOT NULL UNIQUE, equipment_type TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS work_employee_access (employee_id INTEGER PRIMARY KEY REFERENCES work_employees(id), user_id INTEGER UNIQUE REFERENCES users(id), state TEXT NOT NULL CHECK(state IN ('pending_activation','active','suspended')), created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
@@ -40,6 +40,9 @@ export function createWorkApp({ database = join(root, 'data', 'work.sqlite'), bo
   if (!hasColumn('work_employees', 'phone')) db.exec('ALTER TABLE work_employees ADD COLUMN phone TEXT');
   if (!hasColumn('work_employees', 'photo_file')) db.exec('ALTER TABLE work_employees ADD COLUMN photo_file TEXT');
   if (!hasColumn('work_employees', 'photo_mime')) db.exec('ALTER TABLE work_employees ADD COLUMN photo_mime TEXT');
+  for (const [column, type] of [['latitude', 'REAL'], ['longitude', 'REAL'], ['radius', 'INTEGER']]) {
+    if (!hasColumn('work_objects', column)) db.exec(`ALTER TABLE work_objects ADD COLUMN ${column} ${type}`);
+  }
   if (!hasColumn('users', 'employee_id')) db.exec('ALTER TABLE users ADD COLUMN employee_id INTEGER REFERENCES work_employees(id)');
   db.exec('CREATE UNIQUE INDEX IF NOT EXISTS work_employees_email_unique ON work_employees(email) WHERE email IS NOT NULL; CREATE UNIQUE INDEX IF NOT EXISTS users_employee_unique ON users(employee_id) WHERE employee_id IS NOT NULL;');
   if (bootstrapAdmin && db.prepare('SELECT 1 FROM users LIMIT 1').get() === undefined) {
@@ -51,7 +54,7 @@ export function createWorkApp({ database = join(root, 'data', 'work.sqlite'), bo
   const tokenHash = token => scryptSync(token, 'maximum-session-v1', 32).toString('hex');
   const currentUser = req => {
     const token = (req.headers.authorization || '').replace(/^Bearer /, '');
-    const row = db.prepare('SELECT u.id, u.login, u.role FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires_at>? AND u.status=?').get(tokenHash(token), Date.now(), 'active');
+    const row = db.prepare('SELECT u.id, u.login, u.role FROM work_sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires_at>? AND u.status=?').get(tokenHash(token), Date.now(), 'active');
     return row || null;
   };
   const audit = (userId, event) => db.prepare('INSERT INTO audit_log (user_id, event, created_at) VALUES (?, ?, ?)').run(userId, event, new Date().toISOString());
@@ -67,7 +70,7 @@ export function createWorkApp({ database = join(root, 'data', 'work.sqlite'), bo
     return value.trim();
   };
   const resources = {
-    objects: { table: 'work_objects', fields: ['address'], labels: { address: 'Адрес объекта' } },
+    objects: { table: 'work_objects', fields: ['address', 'latitude', 'longitude', 'radius'], labels: { address: 'Адрес объекта', latitude: 'Широта', longitude: 'Долгота', radius: 'Радиус объекта' } },
     employees: { table: 'work_employees', fields: ['full_name', 'email', 'phone', 'birth_date', 'clothing_size', 'shoe_size', 'privacy_policy_version', 'privacy_confirmed_at'], labels: { full_name: 'ФИО', email: 'Личный email', phone: 'Телефон', birth_date: 'Дата рождения', clothing_size: 'Размер одежды', shoe_size: 'Размер обуви', privacy_confirmed_at: 'Подтверждение политики' } },
     equipment: { table: 'work_equipment', fields: ['name', 'inventory_number', 'equipment_type'], labels: { name: 'Название', inventory_number: 'Инвентарный номер', equipment_type: 'Тип оборудования' } },
   };
@@ -88,7 +91,12 @@ export function createWorkApp({ database = join(root, 'data', 'work.sqlite'), bo
     const photo = resource.key === 'employees' ? photoFor(input.photo_data) : null;
     const writable = resource.key === 'employees' ? resource.fields.filter(field => field !== 'privacy_policy_version') : resource.fields;
     if (!input || Object.keys(input).some(key => !writable.includes(key) && key !== 'photo_data')) { const error = new Error('В карточке есть неподдерживаемые поля.'); error.status = 400; throw error; }
-    const value = Object.fromEntries(resource.fields.map(field => [field, field === 'privacy_policy_version' ? privacyPolicyVersion : text(input[field], resource.labels[field]) ]));
+    const value = Object.fromEntries(resource.fields.map(field => [field, field === 'privacy_policy_version' ? privacyPolicyVersion : resource.key === 'objects' && ['latitude', 'longitude', 'radius'].includes(field) ? Number(input[field]) : text(input[field], resource.labels[field]) ]));
+    if (resource.key === 'objects') {
+      if (!Number.isFinite(value.latitude) || value.latitude < -90 || value.latitude > 90) { const error = new Error('Укажите точку объекта на карте.'); error.status = 400; throw error; }
+      if (!Number.isFinite(value.longitude) || value.longitude < -180 || value.longitude > 180) { const error = new Error('Укажите точку объекта на карте.'); error.status = 400; throw error; }
+      if (!Number.isInteger(value.radius) || value.radius < 10 || value.radius > 5000) { const error = new Error('Радиус объекта должен быть от 10 до 5 000 м.'); error.status = 400; throw error; }
+    }
     if (resource.key === 'employees' && !/^\d{4}-\d{2}-\d{2}$/.test(value.birth_date)) { const error = new Error('Укажите дату рождения.'); error.status = 400; throw error; }
     if (resource.key === 'employees' && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.email)) { const error = new Error('Укажите личный email в обычном формате.'); error.status = 400; throw error; }
     if (resource.key === 'employees' && !/^[0-9+()\-\s]{7,30}$/.test(value.phone)) { const error = new Error('Укажите телефон в обычном формате.'); error.status = 400; throw error; }
@@ -101,10 +109,10 @@ export function createWorkApp({ database = join(root, 'data', 'work.sqlite'), bo
   };
   const server = http.createServer(async (req, res) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('Referrer-Policy', 'no-referrer');
+    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('Permissions-Policy', 'geolocation=(), camera=(), microphone=()');
-    res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
+    res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self' https://api-maps.yandex.ru https://yastatic.net; style-src 'self' 'unsafe-inline' https://yastatic.net; img-src 'self' data: https://*.maps.yandex.ru https://*.yandex.ru https://*.maps.yandex.net; connect-src 'self' https://*.maps.yandex.ru https://*.yandex.ru https://*.maps.yandex.net https://yastatic.net; worker-src 'self' blob: data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
     try {
       const url = new URL(req.url, 'http://localhost');
       if (req.method === 'GET' && assets[url.pathname]) {
@@ -118,18 +126,23 @@ export function createWorkApp({ database = join(root, 'data', 'work.sqlite'), bo
       }
       if (req.method === 'GET' && req.url === '/api/health') return json(res, 200, { ok: true, mode: 'work' });
       if (req.method === 'GET' && req.url === '/api/auth/session') { const user = currentUser(req); return user ? json(res, 200, { user }) : json(res, 401, { error: 'Требуется вход.' }); }
+      if (req.method === 'GET' && req.url === '/api/manager/map-config') {
+        requireManager(req);
+        const key = typeof yandexMapsApiKey === 'string' ? yandexMapsApiKey.trim() : '';
+        return json(res, 200, { provider: 'yandex', enabled: Boolean(key), scriptUrl: key ? `https://api-maps.yandex.ru/v3/?apikey=${encodeURIComponent(key)}&lang=ru_RU` : null });
+      }
       if (req.method === 'POST' && req.url === '/api/auth/login') {
         const input = await readJson(req); const login = cleanLogin(input.login);
         if (!login || typeof input.password !== 'string') return json(res, 400, { error: 'Проверьте логин и пароль.' });
         const user = db.prepare('SELECT * FROM users WHERE login=?').get(login);
         if (!user || user.status !== 'active' || !passwordMatches(input.password, user.password_hash)) return json(res, 401, { error: 'Неверный логин или пароль.' });
         const token = randomBytes(32).toString('base64url');
-        db.prepare('DELETE FROM sessions WHERE expires_at<=?').run(Date.now());
-        db.prepare('INSERT INTO sessions VALUES (?, ?, ?, ?)').run(tokenHash(token), user.id, Date.now() + sessionDays * 86400000, new Date().toISOString());
+        db.prepare('DELETE FROM work_sessions WHERE expires_at<=?').run(Date.now());
+        db.prepare('INSERT INTO work_sessions VALUES (?, ?, ?, ?)').run(tokenHash(token), user.id, Date.now() + sessionDays * 86400000, new Date().toISOString());
         audit(user.id, 'login');
         return json(res, 201, { token, user: { id: user.id, login: user.login, role: user.role } });
       }
-      if (req.method === 'POST' && req.url === '/api/auth/logout') { const user = currentUser(req); if (user) { db.prepare('DELETE FROM sessions WHERE token_hash=?').run(tokenHash((req.headers.authorization || '').replace(/^Bearer /, ''))); audit(user.id, 'logout'); } return json(res, 204, {}); }
+      if (req.method === 'POST' && req.url === '/api/auth/logout') { const user = currentUser(req); if (user) { db.prepare('DELETE FROM work_sessions WHERE token_hash=?').run(tokenHash((req.headers.authorization || '').replace(/^Bearer /, ''))); audit(user.id, 'logout'); } return json(res, 204, {}); }
       const resource = resourceFor(url.pathname);
       const photoMatch = /^\/api\/manager\/employees\/(\d+)\/photo$/.exec(url.pathname);
       if (photoMatch && req.method === 'GET') {
@@ -192,6 +205,6 @@ export function createWorkApp({ database = join(root, 'data', 'work.sqlite'), bo
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-  const app = createWorkApp({ database: process.env.WORK_DATABASE || join(root, 'data', 'work.sqlite'), bootstrapAdmin: process.env.BOOTSTRAP_ADMIN_LOGIN ? { login: process.env.BOOTSTRAP_ADMIN_LOGIN, password: process.env.BOOTSTRAP_ADMIN_PASSWORD } : undefined });
+  const app = createWorkApp({ database: process.env.WORK_DATABASE || join(root, 'data', 'work.sqlite'), yandexMapsApiKey: process.env.YANDEX_MAPS_API_KEY, bootstrapAdmin: process.env.BOOTSTRAP_ADMIN_LOGIN ? { login: process.env.BOOTSTRAP_ADMIN_LOGIN, password: process.env.BOOTSTRAP_ADMIN_PASSWORD } : undefined });
   app.server.listen(Number(process.env.PORT || 4174), process.env.HOST || '127.0.0.1');
 }

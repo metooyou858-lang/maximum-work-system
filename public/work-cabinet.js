@@ -25,7 +25,11 @@ let editing = null;
 let viewing = null;
 let menuOpen = false;
 let photoUrl = null;
+let yandexMapsPromise;
+let objectMap;
+let objectMarker;
 const routeKey = 'maximum-work-route';
+const apiRoot = '/manager';
 
 function savedRoute() {
   const hash = /^#(objects|employees|equipment)\/(list|view|edit|create)(?:\/(\d+))?$/.exec(location.hash);
@@ -47,7 +51,7 @@ function storeRoute() {
 async function api(path, input, method = 'POST') {
   let response;
   try {
-    response = await fetch(path, { method, signal: AbortSignal.timeout(10000), headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) }, ...(input === undefined ? {} : { body: JSON.stringify(input) }) });
+    response = await fetch(`${apiRoot}${path}`, { method, signal: AbortSignal.timeout(10000), headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) }, ...(input === undefined ? {} : { body: JSON.stringify(input) }) });
   } catch { throw new Error('Не удалось связаться с сервером за 10 секунд. Проверьте, что приложение запущено, и повторите попытку.'); }
   if (response.status === 204) return null;
   let result;
@@ -107,7 +111,7 @@ async function showEmployeePhoto(employee) {
   const fallback = document.querySelector('#employee-initials');
   if (!image || !employee.photo_file) return;
   try {
-    const response = await fetch(`/api/manager/employees/${employee.id}/photo`, { signal: AbortSignal.timeout(10000), headers: { Authorization: `Bearer ${token}` } });
+    const response = await fetch(`${apiRoot}/api/manager/employees/${employee.id}/photo`, { signal: AbortSignal.timeout(10000), headers: { Authorization: `Bearer ${token}` } });
     if (!response.ok) return;
     photoUrl = URL.createObjectURL(await response.blob());
     image.src = photoUrl; image.hidden = false; fallback.hidden = true;
@@ -130,7 +134,28 @@ function editor() {
     }
     return `<div class="control"><label for="${name}">${label}</label><select id="${name}" name="${name}" required><option value="" disabled ${value ? '' : 'selected'}>Выберите размер</option>${options.map(option => `<option value="${option}" ${option === value ? 'selected' : ''}>${option}</option>`).join('')}</select></div>`;
   };
-  return `<section class="page form-page"><header class="page-head"><div><button class="back" id="cancel">← К списку</button><h1>${escapeHtml(title)}</h1></div></header><form id="record-form">${resource.fields.map(field).join('')}${current === 'employees' ? `<section class="privacy"><h2>Персональные данные и доступ</h2><p>Личный email нужен для будущего приглашения. При создании карточки система связывает сотрудника с отдельной будущей учётной записью; в тестовой среде приглашение не отправляется. Версия политики: «Тестовая политика 1.0».</p><label class="check"><input id="privacy-confirmed" type="checkbox" ${item.privacy_confirmed_at ? 'checked' : ''} required> Подтверждение ознакомления с политикой зафиксировано</label></section>` : ''}<div id="form-error" role="alert"></div><div class="form-actions"><button type="button" id="cancel-bottom">Отменить</button><button class="primary" type="submit">${item.id ? 'Сохранить изменения' : 'Создать карточку'}</button></div></form></section>`;
+  const objectLocation = current === 'objects' ? `<section class="object-location" aria-labelledby="map-title"><h2 id="map-title">Точка объекта</h2><p>Поставьте маркер касанием карты. Радиус — допустимое расстояние для отметки прибытия.</p><div id="object-map-status" class="map-status" role="status">Подключаем карту…</div><div id="object-map" class="object-map" aria-label="Карта для выбора точки объекта"></div><input id="latitude" name="latitude" type="hidden" value="${escapeHtml(item.latitude ?? '')}"><input id="longitude" name="longitude" type="hidden" value="${escapeHtml(item.longitude ?? '')}"><p id="object-point" class="map-point">${item.latitude !== undefined && item.latitude !== null && item.longitude !== undefined && item.longitude !== null ? `Точка: ${Number(item.latitude).toFixed(6)}, ${Number(item.longitude).toFixed(6)}` : 'Точка пока не выбрана.'}</p><div class="control"><label for="radius">Радиус объекта, м</label><input id="radius" name="radius" type="number" inputmode="numeric" min="10" max="5000" step="1" required value="${escapeHtml(item.radius ?? 150)}"></div></section>` : '';
+  return `<section class="page form-page"><header class="page-head"><div><button class="back" id="cancel">← К списку</button><h1>${escapeHtml(title)}</h1></div></header><form id="record-form">${resource.fields.map(field).join('')}${objectLocation}${current === 'employees' ? `<section class="privacy"><h2>Персональные данные и доступ</h2><p>Личный email нужен для будущего приглашения. При создании карточки система связывает сотрудника с отдельной будущей учётной записью; в тестовой среде приглашение не отправляется. Версия политики: «Тестовая политика 1.0».</p><label class="check"><input id="privacy-confirmed" type="checkbox" ${item.privacy_confirmed_at ? 'checked' : ''} required> Подтверждение ознакомления с политикой зафиксировано</label></section>` : ''}<div id="form-error" role="alert"></div><div class="form-actions"><button type="button" id="cancel-bottom">Отменить</button><button class="primary" type="submit">${item.id ? 'Сохранить изменения' : 'Создать карточку'}</button></div></form></section>`;
+}
+
+function loadYandexMaps(scriptUrl) {
+  if (window.ymaps3) return Promise.resolve();
+  if (!yandexMapsPromise) yandexMapsPromise = new Promise((resolve, reject) => { const script = document.createElement('script'); script.src = scriptUrl; script.onload = resolve; script.onerror = () => reject(new Error('Не удалось загрузить Яндекс Карты.')); document.head.appendChild(script); });
+  return yandexMapsPromise;
+}
+async function initializeObjectMap() {
+  const rootMap = document.querySelector('#object-map'); const status = document.querySelector('#object-map-status');
+  if (!rootMap || !status) return;
+  const config = await api('/api/manager/map-config', undefined, 'GET');
+  if (!config.enabled) throw new Error('Ключ Яндекс Карт не настроен на сервере.');
+  await loadYandexMaps(config.scriptUrl); await window.ymaps3.ready;
+  const latitudeValue = document.querySelector('#latitude').value; const longitudeValue = document.querySelector('#longitude').value; const latitude = Number(latitudeValue); const longitude = Number(longitudeValue); const hasPoint = latitudeValue !== '' && longitudeValue !== '' && Number.isFinite(latitude) && Number.isFinite(longitude);
+  const map = new window.ymaps3.YMap(rootMap, { location: { center: hasPoint ? [longitude, latitude] : [37.6176, 55.7558], zoom: hasPoint ? 16 : 10 } });
+  map.addChild(new window.ymaps3.YMapDefaultSchemeLayer({})); map.addChild(new window.ymaps3.YMapDefaultFeaturesLayer({ zIndex: 1800 }));
+  const setPoint = coordinates => { document.querySelector('#longitude').value = coordinates[0]; document.querySelector('#latitude').value = coordinates[1]; document.querySelector('#object-point').textContent = `Точка: ${coordinates[1].toFixed(6)}, ${coordinates[0].toFixed(6)}`; if (objectMarker) map.removeChild(objectMarker); const pin = document.createElement('div'); pin.className = 'map-pin'; objectMarker = new window.ymaps3.YMapMarker({ coordinates }, pin); map.addChild(objectMarker); status.textContent = 'Точка выбрана. Сохраните карточку объекта.'; };
+  if (hasPoint) setPoint([longitude, latitude]);
+  map.addChild(new window.ymaps3.YMapListener({ layer: 'any', onClick: (_, event) => { if (event?.coordinates) setPoint(event.coordinates); } }));
+  status.textContent = hasPoint ? 'Точка загружена. Коснитесь карты, чтобы перенести её.' : 'Коснитесь карты, чтобы поставить точку объекта.'; objectMap = map;
 }
 function details() {
   const resource = resources[current]; const item = viewing;
@@ -161,6 +186,7 @@ function render(message = '') {
   document.querySelector('#phone')?.addEventListener('input', event => { event.currentTarget.value = phoneMask(event.currentTarget.value); });
   if (viewing?.photo_file && current === 'employees') showEmployeePhoto(viewing);
   else clearPhotoUrl();
+  if (editing !== null && current === 'objects') initializeObjectMap().catch(error => { const status = document.querySelector('#object-map-status'); if (status) status.textContent = error.message; });
 }
 async function load(restoreRoute = false) {
   const route = restoreRoute ? savedRoute() : null;
@@ -174,7 +200,7 @@ async function load(restoreRoute = false) {
 }
 async function save(event) {
   event.preventDefault(); const form = event.currentTarget; if (!form.reportValidity()) return;
-  const input = Object.fromEntries(new FormData(form)); if (current === 'employees') input.privacy_confirmed_at = new Date().toISOString();
+  const input = Object.fromEntries(new FormData(form)); if (current === 'objects') { input.latitude = Number(input.latitude); input.longitude = Number(input.longitude); input.radius = Number(input.radius); } if (current === 'employees') input.privacy_confirmed_at = new Date().toISOString();
   const button = form.querySelector('[type="submit"]'); button.disabled = true;
   try {
     const photo = form.querySelector('#photo')?.files[0];
