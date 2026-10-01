@@ -1,9 +1,9 @@
 import http from 'node:http';
-import { DatabaseSync } from 'node:sqlite';
 import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createPostgresDatabase } from './postgres-db.mjs';
 
 const root = dirname(fileURLToPath(import.meta.url));
 const sessionDays = 7;
@@ -23,46 +23,35 @@ const passwordMatches = (password, stored) => {
 };
 const cleanLogin = value => typeof value === 'string' && /^[a-z0-9][a-z0-9._-]{2,63}$/i.test(value) ? value.toLowerCase() : null;
 
-export function createWorkApp({ database = join(root, 'data', 'work.sqlite'), bootstrapAdmin, yandexMapsApiKey = process.env.YANDEX_MAPS_API_KEY, yandexGeocoderApiKey = process.env.YANDEX_GEOCODER_API_KEY } = {}) {
-  if (database !== ':memory:') mkdirSync(dirname(database), { recursive: true });
-  const db = new DatabaseSync(database);
-  db.exec(`PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;
-    CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, login TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('manager','foreman','employee')), status TEXT NOT NULL CHECK(status IN ('active','suspended')), employee_id INTEGER UNIQUE REFERENCES work_employees(id), created_at TEXT NOT NULL);
-    CREATE TABLE IF NOT EXISTS work_sessions (token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), expires_at INTEGER NOT NULL, created_at TEXT NOT NULL);
-    CREATE TABLE IF NOT EXISTS audit_log (id INTEGER PRIMARY KEY, user_id INTEGER REFERENCES users(id), event TEXT NOT NULL, created_at TEXT NOT NULL);
-    CREATE TABLE IF NOT EXISTS work_objects (id INTEGER PRIMARY KEY, contractor_name TEXT NOT NULL DEFAULT '', address TEXT NOT NULL UNIQUE, latitude REAL, longitude REAL, radius INTEGER, address_verified INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
-    CREATE TABLE IF NOT EXISTS work_employees (id INTEGER PRIMARY KEY, full_name TEXT NOT NULL, email TEXT NOT NULL UNIQUE, phone TEXT NOT NULL, birth_date TEXT NOT NULL, clothing_size TEXT NOT NULL, shoe_size TEXT NOT NULL, photo_file TEXT, photo_mime TEXT, privacy_policy_version TEXT NOT NULL, privacy_confirmed_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
-    CREATE TABLE IF NOT EXISTS work_equipment (id INTEGER PRIMARY KEY, name TEXT NOT NULL, inventory_number TEXT NOT NULL UNIQUE, equipment_type TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
-    CREATE TABLE IF NOT EXISTS work_employee_access (employee_id INTEGER PRIMARY KEY REFERENCES work_employees(id), user_id INTEGER UNIQUE REFERENCES users(id), state TEXT NOT NULL CHECK(state IN ('pending_activation','active','suspended')), created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+export async function createWorkApp({ database = process.env.DATABASE_URL, bootstrapAdmin, yandexMapsApiKey = process.env.YANDEX_MAPS_API_KEY, yandexGeocoderApiKey = process.env.YANDEX_GEOCODER_API_KEY } = {}) {
+  if (!database) throw new Error('DATABASE_URL не настроен.');
+  const db = createPostgresDatabase(database);
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS users (id BIGSERIAL PRIMARY KEY, login TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('manager','foreman','employee')), status TEXT NOT NULL CHECK(status IN ('active','suspended')), employee_id BIGINT UNIQUE, created_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS work_sessions (token_hash TEXT PRIMARY KEY, user_id BIGINT NOT NULL REFERENCES users(id), expires_at BIGINT NOT NULL, created_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS audit_log (id BIGSERIAL PRIMARY KEY, user_id BIGINT REFERENCES users(id), event TEXT NOT NULL, created_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS work_objects (id BIGSERIAL PRIMARY KEY, contractor_name TEXT NOT NULL DEFAULT '', address TEXT NOT NULL UNIQUE, latitude DOUBLE PRECISION, longitude DOUBLE PRECISION, radius INTEGER, address_verified INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS work_employees (id BIGSERIAL PRIMARY KEY, full_name TEXT NOT NULL, email TEXT NOT NULL UNIQUE, phone TEXT NOT NULL, birth_date TEXT NOT NULL, clothing_size TEXT NOT NULL, shoe_size TEXT NOT NULL, photo_file TEXT, photo_mime TEXT, privacy_policy_version TEXT NOT NULL, privacy_confirmed_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS work_equipment (id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL, inventory_number TEXT NOT NULL UNIQUE, equipment_type TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS work_employee_access (employee_id BIGINT PRIMARY KEY REFERENCES work_employees(id), user_id BIGINT UNIQUE REFERENCES users(id), state TEXT NOT NULL CHECK(state IN ('pending_activation','active','suspended')), created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
   `);
-  const hasColumn = (table, column) => db.prepare(`PRAGMA table_info(${table})`).all().some(item => item.name === column);
-  if (!hasColumn('work_employees', 'email')) db.exec('ALTER TABLE work_employees ADD COLUMN email TEXT');
-  if (!hasColumn('work_employees', 'phone')) db.exec('ALTER TABLE work_employees ADD COLUMN phone TEXT');
-  if (!hasColumn('work_employees', 'photo_file')) db.exec('ALTER TABLE work_employees ADD COLUMN photo_file TEXT');
-  if (!hasColumn('work_employees', 'photo_mime')) db.exec('ALTER TABLE work_employees ADD COLUMN photo_mime TEXT');
-  for (const [column, type] of [['latitude', 'REAL'], ['longitude', 'REAL'], ['radius', 'INTEGER']]) {
-    if (!hasColumn('work_objects', column)) db.exec(`ALTER TABLE work_objects ADD COLUMN ${column} ${type}`);
-  }
-  if (!hasColumn('work_objects', 'address_verified')) db.exec('ALTER TABLE work_objects ADD COLUMN address_verified INTEGER NOT NULL DEFAULT 0');
-  if (!hasColumn('work_objects', 'contractor_name')) db.exec("ALTER TABLE work_objects ADD COLUMN contractor_name TEXT NOT NULL DEFAULT ''");
-  if (!hasColumn('users', 'employee_id')) db.exec('ALTER TABLE users ADD COLUMN employee_id INTEGER REFERENCES work_employees(id)');
-  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS work_employees_email_unique ON work_employees(email) WHERE email IS NOT NULL; CREATE UNIQUE INDEX IF NOT EXISTS users_employee_unique ON users(employee_id) WHERE employee_id IS NOT NULL;');
-  if (bootstrapAdmin && db.prepare('SELECT 1 FROM users LIMIT 1').get() === undefined) {
+  const hasColumn = async (table, column) => (await db.prepare('SELECT column_name FROM information_schema.columns WHERE table_name=? AND column_name=?').all(table, column)).length > 0;
+  if (bootstrapAdmin && await db.prepare('SELECT 1 FROM users LIMIT 1').get() === undefined) {
     const login = cleanLogin(bootstrapAdmin.login);
     if (!login || typeof bootstrapAdmin.password !== 'string' || bootstrapAdmin.password.length < 14) throw new Error('Для первого руководителя нужны логин и пароль не короче 14 символов.');
-    db.prepare('INSERT INTO users (login, password_hash, role, status, created_at) VALUES (?, ?, ?, ?, ?)').run(login, passwordHash(bootstrapAdmin.password), 'manager', 'active', new Date().toISOString());
+    await db.prepare('INSERT INTO users (login, password_hash, role, status, created_at) VALUES (?, ?, ?, ?, ?) RETURNING id').run(login, passwordHash(bootstrapAdmin.password), 'manager', 'active', new Date().toISOString());
   }
   const json = (res, status, value) => { res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(value)); };
   const tokenHash = token => scryptSync(token, 'maximum-session-v1', 32).toString('hex');
-  const currentUser = req => {
+  const currentUser = async req => {
     const token = (req.headers.authorization || '').replace(/^Bearer /, '');
-    const row = db.prepare('SELECT u.id, u.login, u.role FROM work_sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires_at>? AND u.status=?').get(tokenHash(token), Date.now(), 'active');
+    const row = await db.prepare('SELECT u.id, u.login, u.role FROM work_sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires_at>? AND u.status=?').get(tokenHash(token), Date.now(), 'active');
     return row || null;
   };
   const audit = (userId, event) => db.prepare('INSERT INTO audit_log (user_id, event, created_at) VALUES (?, ?, ?)').run(userId, event, new Date().toISOString());
   const readJson = async req => { let raw = ''; for await (const chunk of req) { raw += chunk; if (Buffer.byteLength(raw) > 7 * 1024 * 1024) throw new Error('Файл слишком большой. Выберите фотографию до 5 МБ.'); } try { return JSON.parse(raw || '{}'); } catch { throw new Error('Не удалось прочитать запрос.'); } };
-  const requireManager = req => {
-    const user = currentUser(req);
+  const requireManager = async req => {
+    const user = await currentUser(req);
     if (!user) { const error = new Error('auth'); error.status = 401; throw error; }
     if (user.role !== 'manager') { const error = new Error('role'); error.status = 403; throw error; }
     return user;
@@ -128,14 +117,14 @@ export function createWorkApp({ database = join(root, 'data', 'work.sqlite'), bo
         if (req.headers.origin && new URL(req.headers.origin).host !== req.headers.host) return json(res, 403, { error: 'Запрос с другого сайта запрещён.' });
       }
       if (req.method === 'GET' && req.url === '/api/health') return json(res, 200, { ok: true, mode: 'work' });
-      if (req.method === 'GET' && req.url === '/api/auth/session') { const user = currentUser(req); return user ? json(res, 200, { user }) : json(res, 401, { error: 'Требуется вход.' }); }
+      if (req.method === 'GET' && req.url === '/api/auth/session') { const user = await currentUser(req); return user ? json(res, 200, { user }) : json(res, 401, { error: 'Требуется вход.' }); }
       if (req.method === 'GET' && req.url === '/api/manager/map-config') {
-        requireManager(req);
+        await requireManager(req);
         const key = typeof yandexMapsApiKey === 'string' ? yandexMapsApiKey.trim() : '';
         return json(res, 200, { provider: 'yandex', enabled: Boolean(key), scriptUrl: key ? `https://api-maps.yandex.ru/v3/?apikey=${encodeURIComponent(key)}&lang=ru_RU` : null });
       }
       if (req.method === 'GET' && url.pathname === '/api/manager/geocode') {
-        requireManager(req);
+        await requireManager(req);
         const query = url.searchParams.get('q')?.trim();
         if (!query || query.length > 200) return json(res, 400, { error: 'Введите адрес для поиска.' });
         const key = typeof yandexGeocoderApiKey === 'string' ? yandexGeocoderApiKey.trim() : '';
@@ -150,61 +139,61 @@ export function createWorkApp({ database = join(root, 'data', 'work.sqlite'), bo
       if (req.method === 'POST' && req.url === '/api/auth/login') {
         const input = await readJson(req); const login = cleanLogin(input.login);
         if (!login || typeof input.password !== 'string') return json(res, 400, { error: 'Проверьте логин и пароль.' });
-        const user = db.prepare('SELECT * FROM users WHERE login=?').get(login);
+        const user = await db.prepare('SELECT * FROM users WHERE login=?').get(login);
         if (!user || user.status !== 'active' || !passwordMatches(input.password, user.password_hash)) return json(res, 401, { error: 'Неверный логин или пароль.' });
         const token = randomBytes(32).toString('base64url');
-        db.prepare('DELETE FROM work_sessions WHERE expires_at<=?').run(Date.now());
-        db.prepare('INSERT INTO work_sessions VALUES (?, ?, ?, ?)').run(tokenHash(token), user.id, Date.now() + sessionDays * 86400000, new Date().toISOString());
-        audit(user.id, 'login');
+        await db.prepare('DELETE FROM work_sessions WHERE expires_at<=?').run(Date.now());
+        await db.prepare('INSERT INTO work_sessions VALUES (?, ?, ?, ?)').run(tokenHash(token), user.id, Date.now() + sessionDays * 86400000, new Date().toISOString());
+        await audit(user.id, 'login');
         return json(res, 201, { token, user: { id: user.id, login: user.login, role: user.role } });
       }
-      if (req.method === 'POST' && req.url === '/api/auth/logout') { const user = currentUser(req); if (user) { db.prepare('DELETE FROM work_sessions WHERE token_hash=?').run(tokenHash((req.headers.authorization || '').replace(/^Bearer /, ''))); audit(user.id, 'logout'); } return json(res, 204, {}); }
+      if (req.method === 'POST' && req.url === '/api/auth/logout') { const user = await currentUser(req); if (user) { await db.prepare('DELETE FROM work_sessions WHERE token_hash=?').run(tokenHash((req.headers.authorization || '').replace(/^Bearer /, ''))); await audit(user.id, 'logout'); } return json(res, 204, {}); }
       const resource = resourceFor(url.pathname);
       const photoMatch = /^\/api\/manager\/employees\/(\d+)\/photo$/.exec(url.pathname);
       if (photoMatch && req.method === 'GET') {
-        requireManager(req);
-        const photo = db.prepare('SELECT photo_file, photo_mime FROM work_employees WHERE id=?').get(Number(photoMatch[1]));
+        await requireManager(req);
+        const photo = await db.prepare('SELECT photo_file, photo_mime FROM work_employees WHERE id=?').get(Number(photoMatch[1]));
         if (!photo?.photo_file || !photo.photo_mime) return json(res, 404, { error: 'Фотография не загружена.' });
         res.writeHead(200, { 'Content-Type': photo.photo_mime, 'Cache-Control': 'no-store' });
         return res.end(readFileSync(join(root, 'data', 'employee-photos', photo.photo_file)));
       }
       if (resource && req.method === 'GET') {
-        requireManager(req);
+        await requireManager(req);
         if (resource.id) {
-          const record = db.prepare(`SELECT * FROM ${resource.table} WHERE id=?`).get(resource.id);
+          const record = await db.prepare(`SELECT * FROM ${resource.table} WHERE id=?`).get(resource.id);
           return record ? json(res, 200, record) : json(res, 404, { error: 'Карточка не найдена.' });
         }
-        return json(res, 200, db.prepare(`SELECT * FROM ${resource.table} ORDER BY updated_at DESC, id DESC`).all());
+        return json(res, 200, await db.prepare(`SELECT * FROM ${resource.table} ORDER BY updated_at DESC, id DESC`).all());
       }
       if (resource && req.method === 'POST' && !resource.id) {
-        const user = requireManager(req); const { value, photo } = await valueFor(resource, req); const now = new Date().toISOString();
+        const user = await requireManager(req); const { value, photo } = await valueFor(resource, req); const now = new Date().toISOString();
         try {
-          const result = db.prepare(`INSERT INTO ${resource.table} (${resource.fields.join(', ')}, created_at, updated_at) VALUES (${resource.fields.map(() => '?').join(', ')}, ?, ?)`).run(...resource.fields.map(field => value[field]), now, now);
-          if (resource.key === 'employees') db.prepare("INSERT INTO work_employee_access (employee_id, state, created_at, updated_at) VALUES (?, 'pending_activation', ?, ?)").run(result.lastInsertRowid, now, now);
+          const result = await db.prepare(`INSERT INTO ${resource.table} (${resource.fields.join(', ')}, created_at, updated_at) VALUES (${resource.fields.map(() => '?').join(', ')}, ?, ?) RETURNING id`).run(...resource.fields.map(field => value[field]), now, now);
+          if (resource.key === 'employees') await db.prepare("INSERT INTO work_employee_access (employee_id, state, created_at, updated_at) VALUES (?, 'pending_activation', ?, ?)").run(result.lastInsertRowid, now, now);
           if (photo) {
             const file = `${randomBytes(18).toString('hex')}.${photo.extension}`;
             const directory = join(root, 'data', 'employee-photos'); mkdirSync(directory, { recursive: true }); writeFileSync(join(directory, file), photo.bytes);
-            db.prepare('UPDATE work_employees SET photo_file=?, photo_mime=?, updated_at=? WHERE id=?').run(file, photo.mime, now, result.lastInsertRowid);
+            await db.prepare('UPDATE work_employees SET photo_file=?, photo_mime=?, updated_at=? WHERE id=?').run(file, photo.mime, now, result.lastInsertRowid);
           }
           audit(user.id, `create_${resource.key}`);
-          return json(res, 201, db.prepare(`SELECT * FROM ${resource.table} WHERE id=?`).get(result.lastInsertRowid));
+          return json(res, 201, await db.prepare(`SELECT * FROM ${resource.table} WHERE id=?`).get(result.lastInsertRowid));
         } catch (error) {
           if (error.message?.includes('UNIQUE constraint failed')) return json(res, 409, { error: resource.key === 'equipment' ? 'Такой инвентарный номер уже есть.' : 'Такая запись уже существует.' });
           throw error;
         }
       }
       if (resource && req.method === 'PUT' && resource.id) {
-        const user = requireManager(req); const { value, photo } = await valueFor(resource, req); const now = new Date().toISOString();
+        const user = await requireManager(req); const { value, photo } = await valueFor(resource, req); const now = new Date().toISOString();
         try {
-          const result = db.prepare(`UPDATE ${resource.table} SET ${resource.fields.map(field => `${field}=?`).join(', ')}, updated_at=? WHERE id=?`).run(...resource.fields.map(field => value[field]), now, resource.id);
+          const result = await db.prepare(`UPDATE ${resource.table} SET ${resource.fields.map(field => `${field}=?`).join(', ')}, updated_at=? WHERE id=?`).run(...resource.fields.map(field => value[field]), now, resource.id);
           if (!result.changes) return json(res, 404, { error: 'Карточка не найдена.' });
           if (photo) {
             const file = `${randomBytes(18).toString('hex')}.${photo.extension}`;
             const directory = join(root, 'data', 'employee-photos'); mkdirSync(directory, { recursive: true }); writeFileSync(join(directory, file), photo.bytes);
-            db.prepare('UPDATE work_employees SET photo_file=?, photo_mime=?, updated_at=? WHERE id=?').run(file, photo.mime, now, resource.id);
+            await db.prepare('UPDATE work_employees SET photo_file=?, photo_mime=?, updated_at=? WHERE id=?').run(file, photo.mime, now, resource.id);
           }
           audit(user.id, `update_${resource.key}`);
-          return json(res, 200, db.prepare(`SELECT * FROM ${resource.table} WHERE id=?`).get(resource.id));
+          return json(res, 200, await db.prepare(`SELECT * FROM ${resource.table} WHERE id=?`).get(resource.id));
         } catch (error) {
           if (error.message?.includes('UNIQUE constraint failed')) return json(res, 409, { error: 'Такой инвентарный номер уже есть.' });
           throw error;
@@ -217,10 +206,10 @@ export function createWorkApp({ database = join(root, 'data', 'work.sqlite'), bo
       return json(res, error.status || 400, { error: error.message || 'Некорректный запрос.' });
     }
   });
-  return { server, db, close: () => new Promise(resolve => server.close(() => { db.close(); resolve(); })) };
+  return { server, db, close: () => new Promise(resolve => server.close(async () => { await db.close(); resolve(); })) };
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-  const app = createWorkApp({ database: process.env.WORK_DATABASE || join(root, 'data', 'work.sqlite'), yandexMapsApiKey: process.env.YANDEX_MAPS_API_KEY, yandexGeocoderApiKey: process.env.YANDEX_GEOCODER_API_KEY, bootstrapAdmin: process.env.BOOTSTRAP_ADMIN_LOGIN ? { login: process.env.BOOTSTRAP_ADMIN_LOGIN, password: process.env.BOOTSTRAP_ADMIN_PASSWORD } : undefined });
+  const app = await createWorkApp({ database: process.env.DATABASE_URL, yandexMapsApiKey: process.env.YANDEX_MAPS_API_KEY, yandexGeocoderApiKey: process.env.YANDEX_GEOCODER_API_KEY, bootstrapAdmin: process.env.BOOTSTRAP_ADMIN_LOGIN ? { login: process.env.BOOTSTRAP_ADMIN_LOGIN, password: process.env.BOOTSTRAP_ADMIN_PASSWORD } : undefined });
   app.server.listen(Number(process.env.PORT || 4174), process.env.HOST || '127.0.0.1');
 }
