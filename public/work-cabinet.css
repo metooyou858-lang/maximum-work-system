@@ -20,4 +20,4 @@ button:hover:not(:disabled) { background: #edf3f6; } button.primary { color: #ff
 .map-status { min-height: 22px; margin: 0 0 8px; color: #526574; font-size: 14px; }
 .map-point { font-variant-numeric: tabular-nums; }
 .map-pin { width: 24px; height: 24px; border-radius: 50% 50% 50% 0; background: #1c75bc; border: 3px solid #fff; box-shadow: 0 1px 4px #0005; transform: rotate(-45deg); }
-.map-search { display: flex; gap: 8px; margin-bottom: 8px; }.map-search input { flex: 1; }.map-search button { min-height: 46px; }
+.address-control { display: flex; gap: 8px; }.address-control input { flex: 1; }.address-control button { min-height: 46px; }

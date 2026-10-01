@@ -23,7 +23,7 @@ const passwordMatches = (password, stored) => {
 };
 const cleanLogin = value => typeof value === 'string' && /^[a-z0-9][a-z0-9._-]{2,63}$/i.test(value) ? value.toLowerCase() : null;
 
-export function createWorkApp({ database = join(root, 'data', 'work.sqlite'), bootstrapAdmin, yandexMapsApiKey = process.env.YANDEX_MAPS_API_KEY } = {}) {
+export function createWorkApp({ database = join(root, 'data', 'work.sqlite'), bootstrapAdmin, yandexMapsApiKey = process.env.YANDEX_MAPS_API_KEY, yandexGeocoderApiKey = process.env.YANDEX_GEOCODER_API_KEY } = {}) {
   if (database !== ':memory:') mkdirSync(dirname(database), { recursive: true });
   const db = new DatabaseSync(database);
   db.exec(`PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;
@@ -130,7 +130,7 @@ export function createWorkApp({ database = join(root, 'data', 'work.sqlite'), bo
       if (req.method === 'GET' && req.url === '/api/auth/session') { const user = currentUser(req); return user ? json(res, 200, { user }) : json(res, 401, { error: 'Требуется вход.' }); }
       if (req.method === 'GET' && req.url === '/api/manager/map-config') {
         requireManager(req);
-        const key = typeof yandexMapsApiKey === 'string' ? yandexMapsApiKey.trim() : '';
+        const key = typeof yandexGeocoderApiKey === 'string' ? yandexGeocoderApiKey.trim() : '';
         return json(res, 200, { provider: 'yandex', enabled: Boolean(key), scriptUrl: key ? `https://api-maps.yandex.ru/v3/?apikey=${encodeURIComponent(key)}&lang=ru_RU` : null });
       }
       if (req.method === 'GET' && url.pathname === '/api/manager/geocode') {
@@ -220,6 +220,6 @@ export function createWorkApp({ database = join(root, 'data', 'work.sqlite'), bo
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-  const app = createWorkApp({ database: process.env.WORK_DATABASE || join(root, 'data', 'work.sqlite'), yandexMapsApiKey: process.env.YANDEX_MAPS_API_KEY, bootstrapAdmin: process.env.BOOTSTRAP_ADMIN_LOGIN ? { login: process.env.BOOTSTRAP_ADMIN_LOGIN, password: process.env.BOOTSTRAP_ADMIN_PASSWORD } : undefined });
+  const app = createWorkApp({ database: process.env.WORK_DATABASE || join(root, 'data', 'work.sqlite'), yandexMapsApiKey: process.env.YANDEX_MAPS_API_KEY, yandexGeocoderApiKey: process.env.YANDEX_GEOCODER_API_KEY, bootstrapAdmin: process.env.BOOTSTRAP_ADMIN_LOGIN ? { login: process.env.BOOTSTRAP_ADMIN_LOGIN, password: process.env.BOOTSTRAP_ADMIN_PASSWORD } : undefined });
   app.server.listen(Number(process.env.PORT || 4174), process.env.HOST || '127.0.0.1');
 }
