@@ -130,14 +130,14 @@ export function createWorkApp({ database = join(root, 'data', 'work.sqlite'), bo
       if (req.method === 'GET' && req.url === '/api/auth/session') { const user = currentUser(req); return user ? json(res, 200, { user }) : json(res, 401, { error: 'Требуется вход.' }); }
       if (req.method === 'GET' && req.url === '/api/manager/map-config') {
         requireManager(req);
-        const key = typeof yandexGeocoderApiKey === 'string' ? yandexGeocoderApiKey.trim() : '';
+        const key = typeof yandexMapsApiKey === 'string' ? yandexMapsApiKey.trim() : '';
         return json(res, 200, { provider: 'yandex', enabled: Boolean(key), scriptUrl: key ? `https://api-maps.yandex.ru/v3/?apikey=${encodeURIComponent(key)}&lang=ru_RU` : null });
       }
       if (req.method === 'GET' && url.pathname === '/api/manager/geocode') {
         requireManager(req);
         const query = url.searchParams.get('q')?.trim();
         if (!query || query.length > 200) return json(res, 400, { error: 'Введите адрес для поиска.' });
-        const key = typeof yandexMapsApiKey === 'string' ? yandexMapsApiKey.trim() : '';
+        const key = typeof yandexGeocoderApiKey === 'string' ? yandexGeocoderApiKey.trim() : '';
         if (!key) return json(res, 503, { error: 'Поиск адресов не настроен на сервере.' });
         const response = await fetch(`https://geocode-maps.yandex.ru/1.x/?apikey=${encodeURIComponent(key)}&geocode=${encodeURIComponent(query)}&format=json&lang=ru_RU`);
         if (!response.ok) return json(res, 502, { error: 'Яндекс не подтвердил адрес. Попробуйте уточнить запрос.' });
