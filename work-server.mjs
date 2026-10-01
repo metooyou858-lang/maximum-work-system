@@ -30,7 +30,7 @@ export function createWorkApp({ database = join(root, 'data', 'work.sqlite'), bo
     CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, login TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('manager','foreman','employee')), status TEXT NOT NULL CHECK(status IN ('active','suspended')), employee_id INTEGER UNIQUE REFERENCES work_employees(id), created_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS work_sessions (token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), expires_at INTEGER NOT NULL, created_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS audit_log (id INTEGER PRIMARY KEY, user_id INTEGER REFERENCES users(id), event TEXT NOT NULL, created_at TEXT NOT NULL);
-    CREATE TABLE IF NOT EXISTS work_objects (id INTEGER PRIMARY KEY, address TEXT NOT NULL UNIQUE, latitude REAL, longitude REAL, radius INTEGER, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS work_objects (id INTEGER PRIMARY KEY, address TEXT NOT NULL UNIQUE, latitude REAL, longitude REAL, radius INTEGER, address_verified INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS work_employees (id INTEGER PRIMARY KEY, full_name TEXT NOT NULL, email TEXT NOT NULL UNIQUE, phone TEXT NOT NULL, birth_date TEXT NOT NULL, clothing_size TEXT NOT NULL, shoe_size TEXT NOT NULL, photo_file TEXT, photo_mime TEXT, privacy_policy_version TEXT NOT NULL, privacy_confirmed_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS work_equipment (id INTEGER PRIMARY KEY, name TEXT NOT NULL, inventory_number TEXT NOT NULL UNIQUE, equipment_type TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS work_employee_access (employee_id INTEGER PRIMARY KEY REFERENCES work_employees(id), user_id INTEGER UNIQUE REFERENCES users(id), state TEXT NOT NULL CHECK(state IN ('pending_activation','active','suspended')), created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
@@ -43,6 +43,7 @@ export function createWorkApp({ database = join(root, 'data', 'work.sqlite'), bo
   for (const [column, type] of [['latitude', 'REAL'], ['longitude', 'REAL'], ['radius', 'INTEGER']]) {
     if (!hasColumn('work_objects', column)) db.exec(`ALTER TABLE work_objects ADD COLUMN ${column} ${type}`);
   }
+  if (!hasColumn('work_objects', 'address_verified')) db.exec('ALTER TABLE work_objects ADD COLUMN address_verified INTEGER NOT NULL DEFAULT 0');
   if (!hasColumn('users', 'employee_id')) db.exec('ALTER TABLE users ADD COLUMN employee_id INTEGER REFERENCES work_employees(id)');
   db.exec('CREATE UNIQUE INDEX IF NOT EXISTS work_employees_email_unique ON work_employees(email) WHERE email IS NOT NULL; CREATE UNIQUE INDEX IF NOT EXISTS users_employee_unique ON users(employee_id) WHERE employee_id IS NOT NULL;');
   if (bootstrapAdmin && db.prepare('SELECT 1 FROM users LIMIT 1').get() === undefined) {
@@ -70,7 +71,7 @@ export function createWorkApp({ database = join(root, 'data', 'work.sqlite'), bo
     return value.trim();
   };
   const resources = {
-    objects: { table: 'work_objects', fields: ['address', 'latitude', 'longitude', 'radius'], labels: { address: 'Адрес объекта', latitude: 'Широта', longitude: 'Долгота', radius: 'Радиус объекта' } },
+    objects: { table: 'work_objects', fields: ['address', 'latitude', 'longitude', 'radius', 'address_verified'], labels: { address: 'Адрес объекта', latitude: 'Широта', longitude: 'Долгота', radius: 'Радиус объекта' } },
     employees: { table: 'work_employees', fields: ['full_name', 'email', 'phone', 'birth_date', 'clothing_size', 'shoe_size', 'privacy_policy_version', 'privacy_confirmed_at'], labels: { full_name: 'ФИО', email: 'Личный email', phone: 'Телефон', birth_date: 'Дата рождения', clothing_size: 'Размер одежды', shoe_size: 'Размер обуви', privacy_confirmed_at: 'Подтверждение политики' } },
     equipment: { table: 'work_equipment', fields: ['name', 'inventory_number', 'equipment_type'], labels: { name: 'Название', inventory_number: 'Инвентарный номер', equipment_type: 'Тип оборудования' } },
   };
@@ -91,8 +92,9 @@ export function createWorkApp({ database = join(root, 'data', 'work.sqlite'), bo
     const photo = resource.key === 'employees' ? photoFor(input.photo_data) : null;
     const writable = resource.key === 'employees' ? resource.fields.filter(field => field !== 'privacy_policy_version') : resource.fields;
     if (!input || Object.keys(input).some(key => !writable.includes(key) && key !== 'photo_data')) { const error = new Error('В карточке есть неподдерживаемые поля.'); error.status = 400; throw error; }
-    const value = Object.fromEntries(resource.fields.map(field => [field, field === 'privacy_policy_version' ? privacyPolicyVersion : resource.key === 'objects' && ['latitude', 'longitude', 'radius'].includes(field) ? Number(input[field]) : text(input[field], resource.labels[field]) ]));
+    const value = Object.fromEntries(resource.fields.map(field => [field, field === 'privacy_policy_version' ? privacyPolicyVersion : field === 'address_verified' ? (input.address_verified === true ? 1 : 0) : resource.key === 'objects' && ['latitude', 'longitude', 'radius'].includes(field) ? Number(input[field]) : text(input[field], resource.labels[field]) ]));
     if (resource.key === 'objects') {
+      if (value.address_verified !== 1) { const error = new Error('Подтвердите адрес выбором найденного объекта на Яндекс Карте.'); error.status = 400; throw error; }
       if (!Number.isFinite(value.latitude) || value.latitude < -90 || value.latitude > 90) { const error = new Error('Укажите точку объекта на карте.'); error.status = 400; throw error; }
       if (!Number.isFinite(value.longitude) || value.longitude < -180 || value.longitude > 180) { const error = new Error('Укажите точку объекта на карте.'); error.status = 400; throw error; }
       if (!Number.isInteger(value.radius) || value.radius < 10 || value.radius > 5000) { const error = new Error('Радиус объекта должен быть от 10 до 5 000 м.'); error.status = 400; throw error; }
@@ -112,7 +114,7 @@ export function createWorkApp({ database = join(root, 'data', 'work.sqlite'), bo
     res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('Permissions-Policy', 'geolocation=(), camera=(), microphone=()');
-    res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self' https://api-maps.yandex.ru https://yastatic.net; style-src 'self' 'unsafe-inline' https://yastatic.net; img-src 'self' data: https://*.maps.yandex.ru https://*.yandex.ru https://*.maps.yandex.net; connect-src 'self' https://*.maps.yandex.ru https://*.yandex.ru https://*.maps.yandex.net https://yastatic.net; worker-src 'self' blob: data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
+    res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self' https://api-maps.yandex.ru https://yastatic.net https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://yastatic.net https://cdn.jsdelivr.net; img-src 'self' data: https://*.maps.yandex.ru https://*.yandex.ru https://*.maps.yandex.net; connect-src 'self' https://*.maps.yandex.ru https://*.yandex.ru https://*.maps.yandex.net https://yastatic.net https://cdn.jsdelivr.net; worker-src 'self' blob: data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
     try {
       const url = new URL(req.url, 'http://localhost');
       if (req.method === 'GET' && assets[url.pathname]) {
@@ -130,6 +132,19 @@ export function createWorkApp({ database = join(root, 'data', 'work.sqlite'), bo
         requireManager(req);
         const key = typeof yandexMapsApiKey === 'string' ? yandexMapsApiKey.trim() : '';
         return json(res, 200, { provider: 'yandex', enabled: Boolean(key), scriptUrl: key ? `https://api-maps.yandex.ru/v3/?apikey=${encodeURIComponent(key)}&lang=ru_RU` : null });
+      }
+      if (req.method === 'GET' && url.pathname === '/api/manager/geocode') {
+        requireManager(req);
+        const query = url.searchParams.get('q')?.trim();
+        if (!query || query.length > 200) return json(res, 400, { error: 'Введите адрес для поиска.' });
+        const key = typeof yandexMapsApiKey === 'string' ? yandexMapsApiKey.trim() : '';
+        if (!key) return json(res, 503, { error: 'Поиск адресов не настроен на сервере.' });
+        const response = await fetch(`https://geocode-maps.yandex.ru/1.x/?apikey=${encodeURIComponent(key)}&geocode=${encodeURIComponent(query)}&format=json&lang=ru_RU`);
+        if (!response.ok) return json(res, 502, { error: 'Яндекс не подтвердил адрес. Попробуйте уточнить запрос.' });
+        const payload = await response.json();
+        const members = payload.response?.GeoObjectCollection?.featureMember || [];
+        const results = members.slice(0, 5).map(({ GeoObject }) => { const position = GeoObject.Point?.pos?.trim().split(/\s+/).map(Number); return position?.length === 2 && position.every(Number.isFinite) ? { address: GeoObject.metaDataProperty?.GeocoderMetaData?.text || GeoObject.name, longitude: position[0], latitude: position[1] } : null; }).filter(Boolean);
+        return json(res, 200, results);
       }
       if (req.method === 'POST' && req.url === '/api/auth/login') {
         const input = await readJson(req); const login = cleanLogin(input.login);

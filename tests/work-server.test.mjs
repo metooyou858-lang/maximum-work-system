@@ -17,7 +17,7 @@ test('рабочий вход создаёт индивидуальную сес
     assert.equal(app.db.prepare('SELECT password_hash FROM users').get().password_hash.includes('correct-horse'), false);
     assert.equal((await request('/api/manager/objects')).status, 401);
     assert.equal((await request('/api/manager/map-config', undefined, login.data.token)).data.enabled, true);
-    const object = await request('/api/manager/objects', { address: 'Учебный адрес, 1', latitude: 55.7558, longitude: 37.6176, radius: 150 }, login.data.token);
+  const object = await request('/api/manager/objects', { address: 'Учебный адрес, 1', latitude: 55.7558, longitude: 37.6176, radius: 150, address_verified: true }, login.data.token);
     assert.equal(object.status, 201);
     assert.equal(object.data.radius, 150);
     assert.equal((await request('/api/manager/objects', undefined, login.data.token)).data[0].address, 'Учебный адрес, 1');
