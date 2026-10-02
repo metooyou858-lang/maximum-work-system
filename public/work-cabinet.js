@@ -6,6 +6,7 @@ const resources = {
     columns: [['full_name', 'ФИО'], ['birth_date', 'Дата рождения'], ['clothing_size', 'Одежда'], ['shoe_size', 'Обувь']],
     fields: [
       ['full_name', 'ФИО', 'text'],
+      ['position', 'Должность', 'text'],
       ['email', 'Личный email', 'email'],
       ['phone', 'Телефон', 'tel'],
       ['photo', 'Фотография', 'file'],
@@ -15,6 +16,7 @@ const resources = {
     ],
   },
   equipment: { title: 'Оборудование', singular: 'оборудование', action: 'Добавить оборудование', columns: [['name', 'Название'], ['inventory_number', 'Инвентарный номер'], ['equipment_type', 'Тип оборудования']], fields: [['name', 'Название', 'text'], ['inventory_number', 'Инвентарный номер', 'text'], ['equipment_type', 'Тип оборудования', 'text']] },
+  settings: { title: 'Системные настройки' },
 };
 const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
 let token = sessionStorage.getItem('maximum-work-token');
@@ -31,6 +33,9 @@ let objectMarker;
 let radiusFeature;
 let selectedAddressCoordinates;
 const routeKey = 'maximum-work-route';
+const accessOptions = [['manage_employees', 'Сотрудники'], ['manage_objects', 'Объекты'], ['manage_equipment', 'Оборудование'], ['manage_assignments', 'Назначения на объекты'], ['manage_settings', 'Системные настройки'], ['employee_cabinet', 'Личный кабинет сотрудника']];
+const can = permission => user?.permissions?.includes(permission);
+const hasManagerAccess = () => ['manage_employees', 'manage_objects', 'manage_equipment', 'manage_assignments', 'manage_settings'].some(can);
 const apiRoot = '/manager';
 
 function savedRoute() {
@@ -62,8 +67,13 @@ async function api(path, input, method = 'POST') {
   return result;
 }
 function loginView(message = '') {
-  root.innerHTML = `<main class="login"><section><p class="eyebrow">MAXIMUM · учёт работ</p><h1>Вход в систему</h1><p>Войдите под своей учётной записью руководителя или сотрудника.</p>${message ? `<div class="error" role="alert">${escapeHtml(message)}</div>` : ''}<form id="login-form"><div class="control"><label for="login">Логин</label><input id="login" name="login" autocomplete="username" maxlength="64" required></div><div class="control"><label for="password">Пароль</label><input id="password" name="password" type="password" autocomplete="current-password" required></div><button class="primary" type="submit">Войти</button></form><p class="note">В тестовой среде используются только синтетические данные.</p></section></main>`;
+  if (/^#activate=/.test(location.hash)) return activationView(message);
+  root.innerHTML = `<main class="login"><section><p class="eyebrow">MAXIMUM · учёт работ</p><h1>Вход в систему</h1><p>Войдите под своей учётной записью руководителя или сотрудника.</p>${message ? `<div class="error" role="alert">${escapeHtml(message)}</div>` : ''}<form id="login-form"><div class="control"><label for="login">Логин</label><input id="login" name="login" autocomplete="username" maxlength="64" required></div><div class="control"><label for="password">Пароль</label><input id="password" name="password" type="password" autocomplete="current-password" required></div><button class="primary" type="submit">Войти</button></form></section></main>`;
   document.querySelector('#login-form').onsubmit = submitLogin;
+}
+function activationView(message = '') {
+  root.innerHTML = `<main class="login"><section><p class="eyebrow">MAXIMUM · приглашение</p><h1>Активируйте учётную запись</h1><p>Придумайте логин и пароль для входа в рабочий кабинет.</p>${message ? `<div class="error" role="alert">${escapeHtml(message)}</div>` : ''}<form id="activation-form"><div class="control"><label for="login">Логин</label><input id="login" name="login" autocomplete="username" maxlength="64" required></div><div class="control"><label for="password">Пароль</label><input id="password" name="password" type="password" autocomplete="new-password" minlength="14" required></div><button class="primary" type="submit">Активировать учётную запись</button></form></section></main>`;
+  document.querySelector('#activation-form').onsubmit = submitActivation;
 }
 async function submitLogin(event) {
   event.preventDefault();
@@ -71,20 +81,39 @@ async function submitLogin(event) {
   try {
     const result = await api('/api/auth/login', Object.fromEntries(new FormData(form)));
     token = result.token; user = result.user; sessionStorage.setItem('maximum-work-token', token);
-    if (user.role !== 'manager') throw new Error('Рабочий кабинет сейчас доступен только руководителю.');
-    await load(true);
+    if (hasManagerAccess()) await load(true);
+    else if (user.role === 'employee') await loadEmployee();
+    else throw new Error('Для этой роли кабинет пока недоступен.');
   } catch (error) { token = null; user = null; sessionStorage.removeItem('maximum-work-token'); loginView(error.message); }
+}
+async function submitActivation(event) {
+  event.preventDefault();
+  const form = event.currentTarget; const button = form.querySelector('button'); button.disabled = true;
+  const input = Object.fromEntries(new FormData(form));
+  try {
+    await api('/api/auth/activate', { ...input, token: decodeURIComponent(location.hash.slice('#activate='.length)) });
+    history.replaceState(null, '', location.pathname);
+    const result = await api('/api/auth/login', input);
+    token = result.token; user = result.user; sessionStorage.setItem('maximum-work-token', token);
+    await loadEmployee();
+  } catch (error) { button.disabled = false; activationView(error.message); }
 }
 async function restore() {
   if (!token) return loginView();
   try {
     const session = await api('/api/auth/session', undefined, 'GET'); user = session.user;
-    if (user.role !== 'manager') throw new Error('Рабочий кабинет сейчас доступен только руководителю.');
-    await load(true);
+    if (hasManagerAccess()) await load(true);
+    else if (user.role === 'employee') await loadEmployee();
+    else throw new Error('Для этой роли кабинет пока недоступен.');
   } catch { token = null; sessionStorage.removeItem('maximum-work-token'); loginView('Сеанс завершён. Войдите снова.'); }
 }
+async function loadEmployee() {
+  const profile = await api('/api/employee/profile', undefined, 'GET');
+  root.innerHTML = `<main class="employee-home"><header><div><p class="eyebrow">MAXIMUM · личный кабинет</p><h1>${escapeHtml(profile.full_name)}</h1></div><button id="logout">Выйти</button></header><section><h2>Мои данные</h2><dl><div><dt>Телефон</dt><dd>${escapeHtml(phoneMask(profile.phone))}</dd></div><div><dt>Личный email</dt><dd>${escapeHtml(profile.email)}</dd></div><div><dt>Размер одежды</dt><dd>${escapeHtml(profile.clothing_size)}</dd></div><div><dt>Размер обуви</dt><dd>${escapeHtml(profile.shoe_size)}</dd></div></dl><p class="employee-home-note">Назначения на объекты и рабочий отчёт появятся здесь после подключения следующего этапа.</p></section></main>`;
+  document.querySelector('#logout').onclick = async () => { try { await api('/api/auth/logout', {}, 'POST'); } finally { token = null; user = null; sessionStorage.removeItem('maximum-work-token'); loginView(); } };
+}
 function nav() {
-  return `<aside class="sidebar ${menuOpen ? 'open' : ''}" aria-label="Основные разделы"><div class="sidebar-head"><span>Учёт работ</span><button class="close-menu" id="close-menu" aria-label="Закрыть меню">×</button></div><nav>${Object.entries(resources).map(([key, resource]) => `<button class="nav-item ${key === current ? 'active' : ''}" data-section="${key}" aria-current="${key === current ? 'page' : 'false'}">${resource.title}</button>`).join('')}</nav><div class="sidebar-foot"><p>${escapeHtml(user.login)}</p><button id="logout">Выйти</button><p class="sidebar-note">Только синтетические данные.</p></div></aside>`;
+  return `<aside class="sidebar ${menuOpen ? 'open' : ''}" aria-label="Основные разделы"><div class="sidebar-head"><span>Учёт работ</span><button class="close-menu" id="close-menu" aria-label="Закрыть меню">×</button></div><nav>${Object.entries(resources).filter(([key]) => key !== 'settings').filter(([key]) => key !== 'employees' || can('manage_employees')).filter(([key]) => key !== 'objects' || can('manage_objects')).filter(([key]) => key !== 'equipment' || can('manage_equipment')).map(([key, resource]) => `<button class="nav-item ${key === current ? 'active' : ''}" data-section="${key}" aria-current="${key === current ? 'page' : 'false'}">${resource.title}</button>`).join('')}</nav><div class="sidebar-foot"><p>${escapeHtml(user.login)}</p>${can('manage_settings') ? '<button class="settings-link" id="open-settings">Настройки</button>' : ''}<button id="logout">Выйти</button></div></aside>`;
 }
 function format(field, value) {
   if (field === 'birth_date' && value) return new Date(`${value}T00:00:00`).toLocaleDateString('ru-RU');
@@ -120,8 +149,9 @@ async function showEmployeePhoto(employee) {
   } catch { /* Карточка остаётся с инициалами, если фотография временно недоступна. */ }
 }
 function list() {
+  if (current === 'settings') return systemSettings();
   const resource = resources[current];
-  const emptyText = current === 'employees' ? 'Добавьте карточку сотрудника. Для него будет создана серверная связь с будущей учётной записью; отправка приглашений пока отключена.' : 'Создайте первую запись — она появится в общем списке.';
+  const emptyText = current === 'employees' ? 'Добавьте карточку сотрудника, затем создайте для него приглашение в карточке.' : 'Создайте первую запись — она появится в общем списке.';
   return `<section class="page"><header class="page-head"><div><h1>${resource.title}</h1><p>${items.length ? `Записей: ${items.length}` : 'Записей пока нет'}</p></div><button class="primary" id="create">${resource.action}</button></header>${items.length ? `<div class="table-wrap"><table><thead><tr>${resource.columns.map(([, label]) => `<th>${label}</th>`).join('')}<th aria-label="Открыть карточку"></th></tr></thead><tbody>${items.map(item => `<tr data-record="${item.id}" tabindex="0">${resource.columns.map(([field]) => `<td>${escapeHtml(format(field, item[field]))}</td>`).join('')}<td class="open-mark" aria-hidden="true">›</td></tr>`).join('')}</tbody></table></div>` : `<section class="empty-state"><h2>Здесь пока пусто</h2><p>${emptyText}</p></section>`}</section>`;
 }
 function editor() {
@@ -138,7 +168,8 @@ function editor() {
     return `<div class="control"><label for="${name}">${label}</label><select id="${name}" name="${name}" required><option value="" disabled ${value ? '' : 'selected'}>Выберите размер</option>${options.map(option => `<option value="${option}" ${option === value ? 'selected' : ''}>${option}</option>`).join('')}</select></div>`;
   };
   const objectLocation = current === 'objects' ? `<section class="object-location" aria-labelledby="map-title"><h2 id="map-title">Подтверждение адреса на карте</h2><p>Проверьте введённый адрес. Сохранить можно только адрес, который подтвердил Яндекс.</p><div id="object-map-status" class="map-status" role="status">Подключаем карту…</div><div id="object-map" class="object-map" aria-label="Карта для подтверждения адреса объекта"></div><input id="latitude" name="latitude" type="hidden" value="${escapeHtml(item.latitude ?? '')}"><input id="longitude" name="longitude" type="hidden" value="${escapeHtml(item.longitude ?? '')}"><input id="address-confirmed" name="address_confirmed" type="hidden" value="${item.address_verified ? 'true' : ''}"><p id="object-point" class="map-point">${item.latitude !== undefined && item.latitude !== null && item.longitude !== undefined && item.longitude !== null ? `Точка: ${Number(item.latitude).toFixed(6)}, ${Number(item.longitude).toFixed(6)}` : 'Адрес пока не подтверждён.'}</p><div class="control"><label for="radius">Радиус объекта, м</label><input id="radius" name="radius" type="number" inputmode="numeric" min="10" max="5000" step="1" required value="${escapeHtml(item.radius ?? 150)}"></div></section>` : '';
-  return `<section class="page form-page"><header class="page-head"><div><button class="back" id="cancel">← К списку</button><h1>${escapeHtml(title)}</h1></div></header><form id="record-form">${resource.fields.map(field).join('')}${objectLocation}${current === 'employees' ? `<section class="privacy"><h2>Персональные данные и доступ</h2><p>Личный email нужен для будущего приглашения. При создании карточки система связывает сотрудника с отдельной будущей учётной записью; в тестовой среде приглашение не отправляется. Версия политики: «Тестовая политика 1.0».</p><label class="check"><input id="privacy-confirmed" type="checkbox" ${item.privacy_confirmed_at ? 'checked' : ''} required> Подтверждение ознакомления с политикой зафиксировано</label></section>` : ''}<div id="form-error" role="alert"></div><div class="form-actions"><button type="button" id="cancel-bottom">Отменить</button><button class="primary" type="submit">${item.id ? 'Сохранить изменения' : 'Создать карточку'}</button></div></form></section>`;
+  const accessFields = current === 'employees' ? `<section class="privacy"><h2>Права доступа</h2><p>Сотрудник получает только отмеченные доступы. Их можно изменить в любой момент.</p><div class="access-grid">${accessOptions.map(([key, label]) => `<label class="check"><input type="checkbox" name="permission" value="${key}" ${(item.permissions || ['employee_cabinet']).includes(key) ? 'checked' : ''}> ${label}</label>`).join('')}</div></section>` : '';
+  return `<section class="page form-page"><header class="page-head"><div><button class="back" id="cancel">← К списку</button><h1>${escapeHtml(title)}</h1></div></header><form id="record-form">${resource.fields.map(field).join('')}${objectLocation}${current === 'employees' ? `<section class="privacy"><h2>Персональные данные</h2><p>Личный email используется для приглашения сотрудника. Версия политики: «Тестовая политика 1.0».</p><label class="check"><input id="privacy-confirmed" type="checkbox" ${item.privacy_confirmed_at ? 'checked' : ''} required> Подтверждение ознакомления с политикой зафиксировано</label></section>${accessFields}` : ''}<div id="form-error" role="alert"></div><div class="form-actions"><button type="button" id="cancel-bottom">Отменить</button><button class="primary" type="submit">${item.id ? 'Сохранить изменения' : 'Создать карточку'}</button></div></form></section>`;
 }
 
 function loadYandexMaps(scriptUrl) {
@@ -176,7 +207,9 @@ function details() {
   if (current === 'employees') {
     const personalField = (name, label, wide = false) => `<div class="employee-field ${wide ? 'wide' : ''}"><dt>${label}</dt><dd>${escapeHtml(format(name, item[name]) || 'Не указано')}</dd></div>`;
     const sizeField = (name, label) => `<div class="employee-size"><dt>${label}</dt><dd>${escapeHtml(item[name] || '—')}</dd></div>`;
-    return `<section class="page employee-detail-page"><article class="employee-card"><header class="employee-card-head"><div class="employee-photo"><span id="employee-initials">${initials(item.full_name)}</span><img id="employee-photo" alt="Фотография сотрудника" hidden></div><div class="employee-card-identity"><p class="employee-card-kicker">Карточка сотрудника</p><h1>${escapeHtml(item.full_name)}</h1></div></header><div class="employee-card-body"><section class="employee-section"><div class="employee-section-heading"><h2>Личные данные</h2><p>4 поля</p></div><dl class="employee-field-grid">${personalField('full_name', 'ФИО', true)}${personalField('email', 'Личный email')}${personalField('phone', 'Телефон')}${personalField('birth_date', 'Дата рождения')}</dl></section><section class="employee-section"><div class="employee-section-heading"><h2>Размеры</h2><p>для экипировки</p></div><dl class="employee-size-grid">${sizeField('clothing_size', 'Размер одежды')}${sizeField('shoe_size', 'Размер обуви')}</dl></section><div class="employee-card-actions"><button class="primary" id="edit">Редактировать данные</button></div></div></article></section>`;
+    const access = item.access_state === 'active' ? 'Учётная запись активирована' : 'Учётная запись ещё не активирована';
+    const invitationBlock = `<div class="employee-invitation"><p>${access}</p></div>`;
+    return `<section class="page employee-detail-page"><article class="employee-card"><header class="employee-card-head"><div class="employee-photo"><span id="employee-initials">${initials(item.full_name)}</span><img id="employee-photo" alt="Фотография сотрудника" hidden></div><div class="employee-card-identity"><p class="employee-card-kicker">Карточка сотрудника</p><h1>${escapeHtml(item.full_name)}</h1></div></header><div class="employee-card-body"><section class="employee-section"><div class="employee-section-heading"><h2>Личные данные</h2><p>4 поля</p></div><dl class="employee-field-grid">${personalField('full_name', 'ФИО', true)}${personalField('email', 'Личный email')}${personalField('phone', 'Телефон')}${personalField('birth_date', 'Дата рождения')}</dl></section><section class="employee-section"><div class="employee-section-heading"><h2>Размеры</h2><p>для экипировки</p></div><dl class="employee-size-grid">${sizeField('clothing_size', 'Размер одежды')}${sizeField('shoe_size', 'Размер обуви')}</dl></section>${invitationBlock}<div class="employee-card-actions"><button class="primary" id="edit">Редактировать данные</button></div></div></article></section>`;
   }
   const visibleFields = resource.fields.filter(([, , type]) => type !== 'file');
   const heading = `<div><button class="back" id="back-list">← К списку</button><h1>${escapeHtml(item.full_name || item.name || item.address)}</h1></div>`;
@@ -186,35 +219,49 @@ function render(message = '') {
   storeRoute();
   root.innerHTML = `<div class="shell">${nav()}<div class="scrim ${menuOpen ? 'visible' : ''}" id="scrim"></div><main class="content"><header class="mobile-head"><button id="open-menu" aria-label="Открыть меню">Меню</button><span>${resources[current].title}</span></header>${message ? `<div class="error" role="alert">${escapeHtml(message)}</div>` : ''}${viewing ? details() : editing === null ? list() : editor()}</main></div>`;
   document.querySelectorAll('[data-section]').forEach(button => button.onclick = async () => { current = button.dataset.section; editing = null; viewing = null; menuOpen = false; try { await load(); } catch (error) { render(error.message); } });
+  document.querySelector('#open-settings')?.addEventListener('click', async () => { current = 'settings'; editing = null; viewing = null; try { await load(); } catch (error) { render(error.message); } });
   document.querySelector('#open-menu')?.addEventListener('click', () => { menuOpen = true; render(); });
   document.querySelector('#close-menu')?.addEventListener('click', () => { menuOpen = false; render(); });
   document.querySelector('#scrim')?.addEventListener('click', () => { menuOpen = false; render(); });
   document.querySelector('#logout').onclick = async () => { try { await api('/api/auth/logout', {}, 'POST'); } finally { token = null; user = null; sessionStorage.removeItem('maximum-work-token'); sessionStorage.removeItem(routeKey); history.replaceState(null, '', location.pathname); loginView(); } };
   document.querySelector('#create')?.addEventListener('click', () => { viewing = null; editing = {}; render(); });
-  document.querySelectorAll('[data-record]').forEach(row => { const open = () => { viewing = items.find(item => item.id === Number(row.dataset.record)); editing = null; render(); }; row.onclick = open; row.onkeydown = event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); open(); } }; });
-  document.querySelector('#back-list')?.addEventListener('click', () => { viewing = null; render(); });
+  document.querySelectorAll('[data-record]').forEach(row => { const open = () => { viewing = items.find(item => String(item.id) === row.dataset.record); editing = null; render(); }; row.onclick = open; row.onkeydown = event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); open(); } }; });
+  document.querySelector('#back-list')?.addEventListener('click', async () => { if (current === 'settings') { current = can('manage_objects') ? 'objects' : can('manage_employees') ? 'employees' : 'equipment'; await load(); } else { viewing = null; render(); } });
   document.querySelector('#edit')?.addEventListener('click', () => { editing = viewing; viewing = null; render(); });
   document.querySelector('#cancel')?.addEventListener('click', () => { editing = null; render(); });
   document.querySelector('#cancel-bottom')?.addEventListener('click', () => { editing = null; render(); });
   document.querySelector('#record-form')?.addEventListener('submit', save);
+  document.querySelector('#email-form')?.addEventListener('submit', saveEmailSettings);
   document.querySelector('#phone')?.addEventListener('input', event => { event.currentTarget.value = phoneMask(event.currentTarget.value); });
   if (viewing?.photo_file && current === 'employees') showEmployeePhoto(viewing);
   else clearPhotoUrl();
   if (editing !== null && current === 'objects') initializeObjectMap().catch(error => { const status = document.querySelector('#object-map-status'); if (status) status.textContent = error.message; });
 }
+function systemSettings() {
+  const email = items.email;
+  if (!email.configured && !email.storage_ready) return `<section class="page form-page"><header class="page-head"><div><h1>Настройки</h1></div></header><div class="error">Защищённое хранилище почтовых настроек не подготовлено на сервере.</div></section>`;
+  return `<section class="page form-page"><header class="page-head"><div><button class="back" id="back-list">← К рабочим разделам</button><h1>Настройки</h1><p>Подключения и параметры системы.</p></div></header><form id="email-form"><section class="privacy"><h2>Почтовый сервис</h2><p>Укажите параметры SMTP — они нужны для приглашений сотрудников. Пароль сохраняется в зашифрованном виде и после сохранения не показывается.</p><div class="control"><label for="smtp-host">SMTP-сервер</label><input id="smtp-host" name="host" required value="${escapeHtml(email.host || '')}" placeholder="smtp.example.ru"></div><div class="control"><label for="smtp-port">Порт</label><input id="smtp-port" name="port" type="number" min="1" max="65535" required value="${escapeHtml(email.port || '465')}"></div><div class="control"><label for="smtp-username">Логин</label><input id="smtp-username" name="username" required value="${escapeHtml(email.username || '')}"></div><div class="control"><label for="smtp-password">Пароль</label><input id="smtp-password" name="password" type="password" required autocomplete="new-password" placeholder="${email.password_configured ? 'Введите пароль, чтобы заменить сохранённый' : ''}"></div><div class="control"><label for="mail-sender">Адрес отправителя</label><input id="mail-sender" name="sender" type="email" required value="${escapeHtml(email.sender || '')}" placeholder="noreply@example.ru"></div><label class="check"><input name="secure" type="checkbox" ${Number(email.port) === 465 ? 'checked' : ''}> Использовать защищённое соединение TLS</label></section><div id="email-error" role="alert"></div><div class="form-actions"><button class="primary" type="submit">Сохранить почтовые настройки</button></div></form></section>`;
+}
 async function load(restoreRoute = false) {
   const route = restoreRoute ? savedRoute() : null;
   if (route) current = route.current;
   items = await api(`/api/manager/${current}`, undefined, 'GET'); editing = null; viewing = null;
+  if (current === 'settings') return render();
   const record = route?.id ? items.find(item => item.id === route.id) : null;
   if (route?.mode === 'view' && record) viewing = record;
   if (route?.mode === 'edit' && record) editing = record;
   if (route?.mode === 'create') editing = {};
   render();
 }
+async function saveEmailSettings(event) {
+  event.preventDefault(); const form = event.currentTarget; const button = form.querySelector('button'); button.disabled = true;
+  const input = Object.fromEntries(new FormData(form)); input.port = Number(input.port); input.secure = input.secure === 'on';
+  try { await api('/api/manager/settings/email', input, 'PUT'); await load(); }
+  catch (error) { button.disabled = false; document.querySelector('#email-error').innerHTML = `<div class="error">${escapeHtml(error.message)}</div>`; }
+}
 async function save(event) {
   event.preventDefault(); const form = event.currentTarget; if (!form.reportValidity()) return;
-  const input = Object.fromEntries(new FormData(form)); if (current === 'objects') { if (selectedAddressCoordinates) { input.longitude = String(selectedAddressCoordinates[0]); input.latitude = String(selectedAddressCoordinates[1]); input.address_confirmed = 'true'; } input.latitude = Number(input.latitude); input.longitude = Number(input.longitude); input.radius = Number(input.radius); input.address_verified = input.address_confirmed === 'true'; delete input.address_confirmed; } if (current === 'employees') input.privacy_confirmed_at = new Date().toISOString();
+  const input = Object.fromEntries(new FormData(form)); if (current === 'objects') { if (selectedAddressCoordinates) { input.longitude = String(selectedAddressCoordinates[0]); input.latitude = String(selectedAddressCoordinates[1]); input.address_confirmed = 'true'; } input.latitude = Number(input.latitude); input.longitude = Number(input.longitude); input.radius = Number(input.radius); input.address_verified = input.address_confirmed === 'true'; delete input.address_confirmed; } if (current === 'employees') { input.privacy_confirmed_at = new Date().toISOString(); input.permissions = [...form.querySelectorAll('input[name="permission"]:checked')].map(input => input.value); delete input.permission; }
   const button = form.querySelector('[type="submit"]'); button.disabled = true;
   try {
     const photo = form.querySelector('#photo')?.files[0];
