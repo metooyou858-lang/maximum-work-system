@@ -119,8 +119,8 @@ export async function createWorkApp({ database = process.env.DATABASE_URL, boots
     if (resource.key === 'employees' && !/^\d{4}-\d{2}-\d{2}$/.test(value.birth_date)) { const error = new Error('Укажите дату рождения.'); error.status = 400; throw error; }
     if (resource.key === 'employees' && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.email)) { const error = new Error('Укажите личный email в обычном формате.'); error.status = 400; throw error; }
     if (resource.key === 'employees' && !/^[0-9+()\-\s]{7,30}$/.test(value.phone)) { const error = new Error('Укажите телефон в обычном формате.'); error.status = 400; throw error; }
-    const grantedPermissions = resource.key === 'employees' ? (Array.isArray(input.permissions) ? input.permissions : []).filter(permission => permissions.has(permission)) : [];
-    if (resource.key === 'employees' && (!Array.isArray(input.permissions) || grantedPermissions.length !== input.permissions.length)) { const error = new Error('Проверьте выбранные права доступа.'); error.status = 400; throw error; }
+    const grantedPermissions = resource.key === 'employees' ? (Array.isArray(input.permissions) ? input.permissions : ['employee_cabinet']).filter(permission => permissions.has(permission)) : [];
+    if (resource.key === 'employees' && Array.isArray(input.permissions) && grantedPermissions.length !== input.permissions.length) { const error = new Error('Проверьте выбранные права доступа.'); error.status = 400; throw error; }
     return { value, photo, grantedPermissions };
   };
   const assets = {
@@ -214,6 +214,17 @@ export async function createWorkApp({ database = process.env.DATABASE_URL, boots
         if (!Number.isInteger(port) || port < 1 || port > 65535 || typeof input.password !== 'string' || !input.password) return json(res, 400, { error: 'Проверьте порт и пароль SMTP.' });
         writeMailSettings({ host, port, username, sender, password: input.password, secure: input.secure === true }); await audit(administrator.id, 'configure_email');
         return json(res, 200, { configured: true, host, port, username, sender, password_configured: true });
+      }
+      if (req.method === 'GET' && req.url === '/api/manager/settings/access') {
+        await requirePermission('manage_settings')(req);
+        return json(res, 200, await db.prepare('SELECT e.id, e.full_name, e.position, a.permissions FROM work_employees e JOIN work_employee_access a ON a.employee_id=e.id ORDER BY e.full_name, e.id').all());
+      }
+      if (req.method === 'PUT' && /^\/api\/manager\/settings\/access\/\d+$/.test(req.url)) {
+        const administrator = await requirePermission('manage_settings')(req); const employeeId = Number(req.url.split('/').pop()); const input = await readJson(req);
+        const granted = Array.isArray(input.permissions) ? input.permissions.filter(permission => permissions.has(permission)) : [];
+        if (granted.length !== input.permissions?.length) return json(res, 400, { error: 'Проверьте выбранные права доступа.' });
+        const result = await db.prepare('UPDATE work_employee_access SET permissions=?, updated_at=? WHERE employee_id=?').run(granted, new Date().toISOString(), employeeId);
+        if (!result.changes) return json(res, 404, { error: 'Сотрудник не найден.' }); await audit(administrator.id, 'update_employee_access'); return json(res, 200, { ok: true });
       }
       const invitationMatch = /^\/api\/manager\/employees\/(\d+)\/invitation$/.exec(url.pathname);
       if (invitationMatch && req.method === 'POST') {
